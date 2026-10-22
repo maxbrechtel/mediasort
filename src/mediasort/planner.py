@@ -583,6 +583,10 @@ def plan_folder(
         # jüngstes Item je Quelle: (Status, Größe, Änderungszeit)
         latest = {row.source: (row.status, row.size, row.mtime) for row in s.execute(
             select(Item.source, Item.status, Item.size, Item.mtime).order_by(Item.id))}
+        # offene Vorschläge früherer Scans belegen ihre Ziele und Titel weiterhin (Abschlussprüfung I2)
+        open_items = list(s.scalars(
+            select(Item).where(Item.status.in_(_OPEN_STATUSES), Item.target.is_not(None),
+                               Item.tmdb_id.is_not(None)).order_by(Item.id)))
     _check_roots(folder, folders)
 
     with ctx.session_factory() as s:
@@ -614,6 +618,8 @@ def plan_folder(
                 items.append(_failed_item(video, folder, scan_id, auto, exc))
         _search_groups(ctx, entries)
         run = _Run(ctx, folder, folders)
+        for other in open_items:
+            _claim_item(run, other, folders, ORIGIN_OPEN)
         for entry in entries:
             try:
                 item = _plan_entry(run, entry, scan_id, auto)
@@ -745,6 +751,9 @@ def replan_item(
             raise NotReplannable(f"Vorschlag {item_id} kann im Status „{item.status}“ nicht korrigiert werden")
         folders = {f.id: f for f in s.scalars(select(Folder))}
         others = list(s.scalars(select(Item).where(Item.scan_id == item.scan_id, Item.id != item.id)))
+        elsewhere = list(s.scalars(select(Item).where(
+            Item.scan_id != item.scan_id, Item.status.in_(_OPEN_STATUSES), Item.target.is_not(None),
+            Item.tmdb_id.is_not(None)).order_by(Item.id)))
 
     if tmdb_ref is not None:
         cand = _reference_candidate(ctx.tmdb, tmdb_ref)
@@ -760,6 +769,8 @@ def replan_item(
     for other in others:
         if other not in group and other.status in _OPEN_STATUSES and other.target and other.tmdb_id:
             _claim_item(run, other, folders, ORIGIN_SCAN)
+    for other in elsewhere:
+        _claim_item(run, other, folders, ORIGIN_OPEN)
 
     corrected = tmdb_ref is not None
     _replan(run, item, cand, season=season, episodes=episodes, format_3d=format_3d, corrected=corrected)

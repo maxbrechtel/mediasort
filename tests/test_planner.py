@@ -684,3 +684,48 @@ def test_unexpected_search_error_marks_only_that_group(env, monkeypatch):
     avatar, matrix = env.plan("Downloads").items()
     assert avatar.confidence == "niedrig" and avatar.target is None and "RuntimeError" in avatar.error
     assert matrix.target is not None and matrix.error is None
+
+
+# --- Abschlussprüfung I2: Dubletten über Scans hinweg --------------------------------------
+
+
+def test_duplicate_across_scans_is_conflict(env):
+    from mediasort.watcher import auto_eligible
+
+    first_src = env.file("Downloads/The.Matrix.1999.1080p/a.mkv")
+    [first] = env.plan("Downloads").items()
+    assert first.conflict_json is None
+    env.file("Downloads/The.Matrix.1999.2160p/b.mkv", UHD_DE)
+    [second] = env.plan("Downloads").items()
+    conflict = second.conflict_json
+    assert conflict["existing"] == [str(first_src)] and conflict["existing_meta"][0]["origin"] == "open"
+    assert conflict["suggestion"] == "keep_new" and not auto_eligible(second)
+
+
+def test_same_episode_across_scans_is_conflict(env):
+    env.file("Downloads/Reacher.S04E05.German.DL.1080p.WEB.h265-W4K/a.mkv")
+    env.plan("Downloads")
+    env.file("Downloads/Reacher.S04E05.German.DL.2160p.DV.HDR.WEBRip.AV1-WOTT/b.mkv", UHD_DE)
+    [second] = env.plan("Downloads").items()
+    assert second.conflict_json["existing"] == [env.p("Downloads/Reacher.S04E05.German.DL.1080p.WEB.h265-W4K/a.mkv")]
+
+
+def test_done_items_of_other_scans_are_not_claimed(env):
+    first_src = env.file("Downloads/The.Matrix.1999.1080p/a.mkv")
+    [first] = env.plan("Downloads").items()
+    with env.sm() as s:
+        s.get(Item, first.id).status = "ignored"
+        s.commit()
+    first_src.unlink()
+    env.file("Downloads/The.Matrix.1999.2160p/b.mkv", UHD_DE)
+    [second] = env.plan("Downloads").items()
+    assert second.conflict_json is None
+
+
+def test_replan_keeps_conflict_with_open_item_of_other_scan(env):
+    first_src = env.file("Downloads/The.Matrix.1999.1080p/a.mkv")
+    env.plan("Downloads")
+    env.file("Downloads/The.Matrix.1999.2160p/b.mkv", UHD_DE)
+    [second] = env.plan("Downloads").items()
+    replan_item(env.ctx, second.id)
+    assert env.item(second.id).conflict_json["existing"] == [str(first_src)]
