@@ -6,7 +6,7 @@ from collections.abc import Callable
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from mediasort.db import FileState, Folder, Item
+from mediasort.db import FileState, Folder, Item, Scan
 from mediasort.jobs import JobRunner
 from mediasort.models import AutoLevel, Confidence, ItemStatus
 from mediasort.settings import load_settings
@@ -143,7 +143,9 @@ class Watcher:
         """Bestätigt die Kandidaten in einer Transaktion direkt vor dem Ausführen.
 
         Hauptschalter und Ordnerstufe werden dabei neu gelesen (die Planung kann Minuten dauern);
-        bestätigt werden nur Vorschläge, die noch ``new`` sind und in einem Ordner auf „auto“ liegen.
+        bestätigt werden nur Vorschläge, die noch ``new`` sind, in einem Ordner auf „auto“ liegen und
+        aus einem fertigen Scan stammen. Ein abgebrochener Scan kann schon Pakete gespeichert haben
+        (Abschlussprüfung R3); diese Vorschläge bleiben der manuellen Prüfung überlassen.
         """
         with self._sf() as s:
             if not load_settings(s).auto_enabled:
@@ -157,6 +159,7 @@ class Watcher:
                     Item.id.in_(ids),
                     Item.status == ItemStatus.NEW.value,
                     Item.folder_id.in_(auto_folders),
+                    Item.scan_id.in_(select(Scan.id).where(Scan.status == "done")),
                 )
                 .values(status=ItemStatus.CONFIRMED.value)
                 .returning(Item.id)

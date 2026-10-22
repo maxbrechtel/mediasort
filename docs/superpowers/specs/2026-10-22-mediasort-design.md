@@ -357,6 +357,7 @@ manuellen Betrieb bewährt hat.
   - Sicherheit hoch,
   - kein Konflikt, keine Dublette,
   - kein Fehler beim Auslesen,
+  - der Scan, aus dem der Vorschlag stammt, ist fehlerfrei zu Ende gelaufen,
   - die Datei ist stabil: mindestens so alt wie das Mindestalter (10 Minuten) und
     Größe sowie Änderungszeit seit der letzten Abfrage unverändert.
 - **Nie automatisch:** Konflikte und Dubletten sowie der Modus „Bibliothek prüfen“.

@@ -97,8 +97,15 @@ class Env:
         os.utime(p, (mtime, mtime))
         return p
 
-    def item(self, folder_id: int, path: Path, scan_id: int | None = None, **kw) -> int:
+    def item(self, folder_id: int, path: Path, scan_id: int | None = None, scan_status: str = "done",
+             **kw) -> int:
         st = path.stat()
+        if scan_id is None:  # Vorschläge stammen immer aus einem Scan
+            with self.sm() as s:
+                scan = Scan(folder_id=folder_id, started=self.clock.t, status=scan_status)
+                s.add(scan)
+                s.commit()
+                scan_id = scan.id
         base = {"folder_id": folder_id, "scan_id": scan_id, "source": str(path), "size": st.st_size,
                 "mtime": st.st_mtime, "confidence": "hoch", "status": "new",
                 "target": str(self.tmp / "lib" / path.name)}
@@ -243,6 +250,21 @@ def test_tick_auto_executes_only_eligible_and_stable(env, w):
     env.clock.t += 900
     assert w.tick() == "1 Ordner geprüft, 0 neue Vorschläge, 3 automatisch einsortiert"
     assert env.ran[-1] == ([b, y, g], True)
+
+
+@pytest.mark.parametrize("scan_status", ["error", "running"])
+def test_tick_auto_skips_items_of_unfinished_scan(env, w, scan_status):
+    # Abschlussprüfung R3: ein abgebrochener Scan hat schon Pakete gespeichert – die bleiben manuell
+    env.settings(auto_enabled=True)
+    fid = env.folder("in", auto_level="auto")
+    broken, fine = env.file("in/broken.mkv"), env.file("in/fine.mkv")
+    b = env.item(fid, broken, scan_status=scan_status)
+    f = env.item(fid, fine)
+    env.state(broken)
+    env.state(fine)
+    assert w.tick() == "1 Ordner geprüft, 0 neue Vorschläge, 1 automatisch einsortiert"
+    assert env.ran == [([f], True)]
+    assert env.status(b) == "new"
 
 
 def test_tick_auto_includes_items_from_this_ticks_plan_only_when_stable(env, w):
