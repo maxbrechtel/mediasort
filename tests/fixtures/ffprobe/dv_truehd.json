@@ -1,0 +1,32 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "hevc",
+      "codec_type": "video",
+      "profile": "Main 10",
+      "width": 3840,
+      "height": 1608,
+      "color_transfer": "smpte2084",
+      "disposition": {"default": 1, "attached_pic": 0},
+      "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 8}]
+    },
+    {
+      "index": 1,
+      "codec_name": "truehd",
+      "codec_type": "audio",
+      "channels": 8,
+      "disposition": {"default": 1, "attached_pic": 0},
+      "tags": {"language": "ger"}
+    },
+    {
+      "index": 2,
+      "codec_name": "ac3",
+      "codec_type": "audio",
+      "channels": 6,
+      "disposition": {"default": 0, "attached_pic": 0},
+      "tags": {"language": "eng"}
+    }
+  ],
+  "format": {"format_name": "matroska,webm", "duration": "7200.000000"}
+}
