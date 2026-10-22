@@ -120,7 +120,7 @@ class Services:
             errors = s.get(Scan, scan_id).errors_json or []
         message = "1 Vorschlag erstellt" if count == 1 else f"{count} Vorschläge erstellt"
         if errors:
-            message += f"; {len(errors)} Pfade nicht lesbar"
+            message += "; 1 Hinweis zum Scan" if len(errors) == 1 else f"; {len(errors)} Hinweise zum Scan"
         return message
 
     def _folder(self, folder_id: int) -> Folder:
@@ -151,7 +151,7 @@ class Services:
         """Führt bestätigte Vorschläge im laufenden Auftrag aus, stößt danach Plex an; liefert Plex-Hinweise."""
         settings = self.settings()
         report = execute(self.sf, ids, settings=settings, job_id=job_id, auto=auto,
-                         progress=progress or (lambda done, total: None))
+                         progress=progress or (lambda done, total: None), now=self._now)
         hints = self.refresh_plex(settings, report.touched)
         for hint in hints:
             log.warning("Plex-Teilscan nach Auftrag %s: %s", job_id, hint)

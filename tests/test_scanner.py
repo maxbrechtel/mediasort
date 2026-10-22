@@ -71,7 +71,29 @@ def test_samples_excluded_and_too_new_skipped(tmp_path, mk):
     mk("R/small.mkv", 50 * MB)
     mk("R/new.mkv", GB, age_s=60)
     r = scan(tmp_path, **DEFAULTS)
-    assert r.videos == [] and len(r.samples) == 2 and [p.name for p in r.too_new] == ["new.mkv"]
+    assert r.videos == [] and [p.name for p in r.too_new] == ["new.mkv"]
+    assert [p.name for p in r.samples] == ["x.sample.mkv"]
+    assert [p.name for p in r.small] == ["small.mkv"]  # nur wegen der Größe: wird gemeldet (C1)
+
+
+def test_small_videos_are_reported_but_not_proposed(tmp_path, mk):
+    mk("S/Show.S01E05.mkv", 50 * MB)
+    mk("S/Show.S01E06.mkv", GB)
+    mk("S/ignoriert.mkv", 50 * MB)
+    r = scan(tmp_path, **DEFAULTS, ignored={str(tmp_path / "S/ignoriert.mkv")})
+    assert [v.path.name for v in r.videos] == ["Show.S01E06.mkv"]
+    assert r.small == [tmp_path / "S/Show.S01E05.mkv"] and r.samples == []
+
+
+def test_video_like_and_partial_extension_sets():
+    from mediasort.scanner import PARTIAL_EXT, VIDEO_LIKE_EXT, is_partial_name
+
+    assert VIDEO_EXT < VIDEO_LIKE_EXT
+    assert {"mpg", "mpeg", "m2v", "vob", "webm", "flv", "divx", "ogm", "ogv", "rmvb", "rm", "3gp",
+            "mts", "asf", "f4v", "mk3d", "dv"} <= VIDEO_LIKE_EXT
+    assert PARTIAL_EXT == {"part", "!qb", "crdownload", "mediasort-old", "mediasort-tmp"}
+    assert is_partial_name("x.mkv.part") and is_partial_name("X.MKV.!QB") and is_partial_name("a.crdownload")
+    assert not is_partial_name("part") and not is_partial_name("x.mkv")
 
 
 def test_sample_word_must_stand_alone(tmp_path, mk):

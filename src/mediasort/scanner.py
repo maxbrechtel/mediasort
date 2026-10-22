@@ -12,8 +12,17 @@ from mediasort.models import Subtitle, VideoFile
 
 VIDEO_EXT = frozenset({"mkv", "mp4", "m4v", "avi", "mov", "wmv", "ts", "m2ts", "iso"})
 SUB_EXT = frozenset({"srt", "ass", "ssa", "sub", "idx", "sup", "vtt"})
+# Alles, was ein Video sein könnte: schützt beim Aufräumen und zählt als vorhandene Version.
+VIDEO_LIKE_EXT = VIDEO_EXT | frozenset({
+    "mpg", "mpeg", "m2v", "vob", "webm", "flv", "divx", "ogm", "ogv", "rmvb", "rm", "3gp", "mts",
+    "asf", "f4v", "mk3d", "dv",
+})
+# Unfertige Dateien (Download-Programme, eigene Zwischennamen), auch als Anhang wie ``x.mkv.part``.
+PARTIAL_EXT = frozenset({"part", "!qb", "crdownload", "mediasort-old", "mediasort-tmp"})
+SAMPLE_DIRS = frozenset({"sample", "samples"})
 
 _SAMPLE_RE = re.compile(r"(?<![A-Za-z0-9])sample(?![A-Za-z0-9])", re.IGNORECASE)
+_SAMPLE_STEM_RE = re.compile(r"(?:^|[.\-_ ])sample$", re.IGNORECASE)
 _NAME_SPLIT_RE = re.compile(r"[._\s-]+")
 _SEPARATORS = ".-_ "
 _LANG_NOISE = frozenset({"sdh", "cc"})
@@ -23,7 +32,8 @@ _SUB_DIRS = frozenset({"subs", "subtitles"})
 @dataclass
 class ScanResult:
     videos: list[VideoFile] = field(default_factory=list)
-    samples: list[Path] = field(default_factory=list)
+    samples: list[Path] = field(default_factory=list)  # „sample“ im Namen
+    small: list[Path] = field(default_factory=list)  # nur wegen der Größe unter der Sample-Grenze
     too_new: list[Path] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)  # deutsche Meldungen zu nicht lesbaren Pfaden
 
@@ -57,6 +67,18 @@ def subtitle_from_path(path: Path, video_stem: str | None = None) -> Subtitle:
 def is_sample_name(name: str) -> bool:
     """Dateiname enthält das Wort „sample“ (nicht als Teil eines längeren Wortes)."""
     return bool(_SAMPLE_RE.search(name))
+
+
+def is_named_sample(name: str, dirs: Sequence[str] = ()) -> bool:
+    """Eindeutig ein Sample nach Namen: liegt in einem Ordner ``Sample(s)`` oder der Name endet
+    auf das Wort ``sample`` (``rel-sample.mkv``, ``rel.sample.mkv``). Die Größe zählt nicht."""
+    stem = name.rpartition(".")[0] if "." in name else name
+    return any(d.lower() in SAMPLE_DIRS for d in dirs) or bool(_SAMPLE_STEM_RE.search(stem))
+
+
+def is_partial_name(name: str) -> bool:
+    """Unfertige Datei (``.part``, ``.!qb``, ``.crdownload``, ``.mediasort-old``/``-tmp``)."""
+    return _ext(name) in PARTIAL_EXT
 
 
 def owns_subtitle(stem: str, subtitle_name: str) -> bool:
@@ -140,7 +162,7 @@ def scan(
                 continue
             if is_sample_name(name) or st.st_size < sample_bytes:
                 if str(path) not in ignored:
-                    result.samples.append(path)
+                    (result.samples if is_sample_name(name) else result.small).append(path)
                 continue
             if str(path) in ignored:
                 local.append((path, st.st_size, -1.0))  # zählt nur für die Untertitelzuordnung
@@ -169,6 +191,7 @@ def scan(
             )
     result.videos.sort(key=lambda v: v.path)
     result.samples.sort()
+    result.small.sort()
     result.too_new.sort()
     result.errors.sort()
     return result

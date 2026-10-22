@@ -7,7 +7,6 @@ und Bibliothekswurzeln werden nie angelegt – nur Ordner darunter.
 import errno
 import logging
 import os
-import re
 import shutil
 import time
 from collections.abc import Callable, Collection, Sequence
@@ -20,7 +19,14 @@ from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, History, Item
 from mediasort.models import ItemStatus
-from mediasort.scanner import SUB_EXT, VIDEO_EXT, owns_subtitle
+from mediasort.scanner import (
+    PARTIAL_EXT,
+    SUB_EXT,
+    VIDEO_EXT,
+    VIDEO_LIKE_EXT,
+    is_named_sample,
+    owns_subtitle,
+)
 from mediasort.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -32,8 +38,10 @@ UNDECIDED = "Konflikt nicht entschieden"
 TARGET_TAKEN = "Ziel belegt"
 SOURCE_CHANGED = "Quelle wurde seit dem Scan verändert"
 _DECISIONS = (None, "keep_new", "keep_existing", "keep_both")
-_SAMPLE_DIRS = frozenset({"sample", "samples"})
-_SAMPLE_STEM_RE = re.compile(r"(?:^|[.\-_ ])sample$", re.IGNORECASE)
+# Beiwerk, das beim Aufräumen unabhängig von der Größe mitgelöscht werden darf
+LEFTOVER_EXT = frozenset({
+    "nfo", "txt", "url", "jpg", "jpeg", "png", "gif", "bmp", "webp", "sfv", "md5", "srr", "nzb", "log", "xml",
+})
 
 
 def _ext(name: str) -> str:
@@ -109,18 +117,34 @@ def _is_guarded(folder: Path, protected: Collection[Path]) -> bool:
     return False
 
 
-def _is_leftover_sample(dirs: Sequence[str], name: str) -> bool:
-    """Großes Video, das trotzdem als Sample gilt: in einem Ordner ``Sample(s)`` oder
-    der Name endet auf das Wort ``sample`` (``rel-sample.mkv``, ``rel.sample.mkv``)."""
-    stem = name.rpartition(".")[0]
-    return any(d.lower() in _SAMPLE_DIRS for d in dirs) or bool(_SAMPLE_STEM_RE.search(stem))
+def _blocks_cleanup(path: Path, dirs: Sequence[str], sample_bytes: int, min_age_s: float, now: float) -> bool:
+    """Diese Datei verhindert das Löschen ihres Ordners (Spec 7.4, Abschlussprüfung C1).
+
+    Blockiert wird von (a) jedem Video, das nicht nach seinem Namen ein Sample ist – egal wie
+    groß –, (b) unfertigen Dateien, (c) Dateien jünger als das Mindestalter und (d) unbekannten
+    Dateien ab der Sample-Grenze. Die Größe allein macht ein Video nie löschbar.
+    """
+    ext = _ext(path.name)
+    if ext in PARTIAL_EXT:
+        return True
+    video = ext in VIDEO_LIKE_EXT
+    if video and not is_named_sample(path.name, dirs):
+        return True
+    try:
+        st = path.stat()
+    except OSError:
+        return not path.is_symlink()  # defekter Link: kein Inhalt
+    if now - st.st_mtime < min_age_s:
+        return True
+    known = video or ext in SUB_EXT or ext in LEFTOVER_EXT
+    return not known and st.st_size >= sample_bytes
 
 
-def _only_leftovers(folder: Path, exclude: Collection[str], sample_bytes: int) -> bool:
-    """Kein echtes Video und kein Ausschlussordner darunter; alles lesbar.
+def _only_leftovers(folder: Path, exclude: Collection[str], sample_bytes: int, min_age_s: float,
+                    now: float) -> bool:
+    """Nichts Schützenswertes und kein Ausschlussordner darunter; alles lesbar.
 
-    Videos ab ``sample_bytes`` zählen als echt, außer sie sind eindeutig Samples (siehe
-    ``_is_leftover_sample``). Versteckte Ordner werden mit durchsucht.
+    Versteckte Ordner werden mit durchsucht (siehe ``_blocks_cleanup``).
     """
     unreadable: list[OSError] = []
     for dirpath, dirnames, filenames in os.walk(folder, onerror=unreadable.append):
@@ -128,22 +152,19 @@ def _only_leftovers(folder: Path, exclude: Collection[str], sample_bytes: int) -
             return False
         rel_dirs = Path(dirpath).relative_to(folder).parts
         for name in filenames:
-            if _ext(name) not in VIDEO_EXT:
-                continue
-            path = Path(dirpath, name)
-            try:
-                size = path.stat().st_size
-            except OSError:
-                if path.is_symlink():
-                    continue  # defekter Link, kein Video
-                return False
-            if size >= sample_bytes and not _is_leftover_sample(rel_dirs, name):
+            if _blocks_cleanup(Path(dirpath, name), rel_dirs, sample_bytes, min_age_s, now):
                 return False
     return not unreadable
 
 
 def cleanup_source(
-    folder: Path, *, protected: Collection[Path], exclude: Sequence[str], sample_bytes: int
+    folder: Path,
+    *,
+    protected: Collection[Path],
+    exclude: Sequence[str],
+    sample_bytes: int,
+    min_age_s: float = 0.0,
+    now: float | None = None,
 ) -> bool:
     """Löscht ``folder`` samt Inhalt, wenn darin nur noch Samples und Beiwerk liegen.
 
@@ -155,7 +176,8 @@ def cleanup_source(
         return False
     if folder.name in exclude or _is_guarded(folder, protected):
         return False
-    if not _only_leftovers(folder, set(exclude), sample_bytes):
+    now = time.time() if now is None else now
+    if not _only_leftovers(folder, set(exclude), sample_bytes, min_age_s, now):
         return False
     shutil.rmtree(folder)
     return True
@@ -185,6 +207,7 @@ class _Context:
     libraries: list[Path]
     protected: frozenset[Path]
     report: ExecutionReport
+    now: Callable[[], float] = time.time
     placed: set[Path] = field(default_factory=set)  # in diesem Auftrag belegte Zielordner
     moved: dict[str, str] = field(default_factory=dict)  # in diesem Auftrag verschoben: alt -> neu
 
@@ -422,6 +445,8 @@ class _ItemRun:
                 protected=self.ctx.protected | self.ctx.placed,
                 exclude=settings.exclude,
                 sample_bytes=settings.sample_bytes,
+                min_age_s=settings.min_age_minutes * 60,
+                now=self.ctx.now(),
             )
         except OSError as exc:
             item.note = f"Ursprungsordner konnte nicht vollständig gelöscht werden: {exc}"
@@ -494,6 +519,7 @@ def execute(
     job_id: int,
     auto: bool = False,
     progress: Callable[[int, int], None] = lambda d, t: None,
+    now: Callable[[], float] = time.time,
 ) -> ExecutionReport:
     """Führt die bestätigten Vorschläge nacheinander aus, jeden in eigener Transaktion."""
     with session_factory() as s:
@@ -504,6 +530,7 @@ def execute(
         libraries=[path for path, role in roots if role == "library"],
         protected=frozenset(protected),
         report=ExecutionReport(),
+        now=now,
     )
     total = len(item_ids)
     for number, item_id in enumerate(item_ids, 1):

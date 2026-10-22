@@ -35,6 +35,7 @@ from mediasort.tmdb import TmdbClient, TmdbError
 SERIES_NOTE = "sieht aus wie eine Serienfolge"
 NO_EPISODE_NOTE = "keine Folgennummer erkannt"
 ALREADY_CORRECT_NOTE = "Datei liegt bereits richtig"
+SMALL_VIDEO_HINT = "Kleine Videodatei übersprungen (unter Sample-Grenze): {}"
 _OPEN_STATUSES = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
 _REPLANNABLE = (ItemStatus.NEW.value, ItemStatus.ERROR.value, ItemStatus.CONFIRMED.value)
 _CONFIDENCE_ORDER = (Confidence.LOW, Confidence.MEDIUM, Confidence.HIGH)
@@ -507,7 +508,8 @@ def plan_folder(
     with ctx.session_factory() as s:
         s.add_all(items)
         row = s.get(Scan, scan_id)
-        row.status, row.finished, row.errors_json = "done", ctx.now(), list(result.errors)
+        row.status, row.finished = "done", ctx.now()
+        row.errors_json = list(result.errors) + [SMALL_VIDEO_HINT.format(p) for p in result.small]
         s.commit()
     return scan_id
 

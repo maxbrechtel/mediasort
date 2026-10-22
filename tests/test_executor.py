@@ -138,7 +138,7 @@ def test_cleanup_deletes_folder_with_leftovers(tmp_path):
     write(rel / "m.nfo")
     write(rel / "cover.jpg")
     sparse(rel / "Sample" / "sample.mkv", 300 * MB)
-    sparse(rel / "small.mkv", 50 * MB)
+    sparse(rel / "small-sample.mkv", 50 * MB)
     assert cleanup_source(rel, protected={tmp_path / "Downloads"}, exclude=EXCLUDE, sample_bytes=100 * MB)
     assert not rel.exists() and (tmp_path / "Downloads").is_dir()
 
@@ -222,12 +222,73 @@ def test_cleanup_keeps_big_movie_with_sample_in_title(tmp_path):
     assert other.exists()
 
 
-def test_cleanup_video_at_sample_limit_blocks(tmp_path):
+def test_cleanup_video_blocks_regardless_of_size(tmp_path):
     rel = tmp_path / "Rel"
     sparse(rel / "m.mkv", 100 * MB)
     assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
-    sparse(rel / "m.mkv", 100 * MB - 1)
+    sparse(rel / "m.mkv", 100 * MB - 1)  # unter der Sample-Grenze, aber kein Sample nach Namen
+    assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert (rel / "m.mkv").exists()
+
+
+# --- Aufräumen: nie echte Videos (Abschlussprüfung C1) ------------------------------------
+
+
+def test_cleanup_keeps_small_real_video(tmp_path):
+    rel = tmp_path / "Show" / "Season 1"
+    small = write(rel / "Show.S01E05.mkv", b"x" * 50)  # echte, aber kleine Folge
+    write(rel / "show.nfo")
+    assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert small.exists()
+
+
+@pytest.mark.parametrize("name", ["Show.S01E06.mpg", "Show.S01E07.webm", "film.MPEG", "VTS_01_1.vob",
+                                  "a.m2v", "a.flv", "a.divx", "a.ogm", "a.ogv", "a.rmvb", "a.rm",
+                                  "a.3gp", "a.mts", "a.asf", "a.f4v", "a.mk3d", "a.dv"])
+def test_cleanup_keeps_video_like_extensions(tmp_path, name):
+    rel = tmp_path / "Rel"
+    video = write(rel / name, b"x" * 5000)
+    assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100)
+    assert video.exists()
+
+
+@pytest.mark.parametrize("name", ["x.mkv.part", "x.mkv.!qb", "x.mkv.CRDOWNLOAD", "x.PART",
+                                  "m.mkv.mediasort-old", "m.mkv.mediasort-tmp"])
+def test_cleanup_keeps_partial_files(tmp_path, name):
+    rel = tmp_path / "Rel"
+    partial = write(rel / name, b"x")
+    assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert partial.exists()
+
+
+def test_cleanup_keeps_files_younger_than_min_age(tmp_path):
+    rel = tmp_path / "Rel"
+    nfo = write(rel / "m.nfo")
+    now = nfo.stat().st_mtime + 60
+    kw = {"protected": set(), "exclude": EXCLUDE, "sample_bytes": 100 * MB, "min_age_s": 600}
+    assert not cleanup_source(rel, now=now, **kw)
+    assert nfo.exists()
+    assert cleanup_source(rel, now=now + 600, **kw)
+    assert not rel.exists()
+
+
+def test_cleanup_keeps_big_unknown_file_but_not_small_one(tmp_path):
+    rel = tmp_path / "Rel"
+    big = sparse(rel / "Film.part01.rar", 300 * MB)
+    assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert big.exists()
+    sparse(rel / "Film.part01.rar", 1 * MB)
+    write(rel / "info.txt")
+    write(rel / "Subs" / "x.srt")
     assert cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+
+
+def test_cleanup_deletes_big_sample_by_name_with_nfo(tmp_path):
+    rel = tmp_path / "Rel"
+    sparse(rel / "Sample" / "sample.mkv", 300 * MB)
+    write(rel / "m.nfo")
+    assert cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert not rel.exists()
 
 
 # --- execute ---------------------------------------------------------------------------
@@ -238,7 +299,7 @@ TARGET_2D = "Filme_2D/M (2020)/M (2020) 1080p h264 AC3 [DE].mkv"
 class Env:
     def __init__(self, root: Path, sm):
         self.root, self.sf = root, sm
-        self.settings = Settings()
+        self.settings = Settings(min_age_minutes=0)  # frisch geschriebene Testdateien blockieren sonst das Aufräumen
         for name in ("Downloads", "Filme_2D", "Serien"):
             (root / name).mkdir(parents=True)
         with sm() as s:
@@ -714,3 +775,28 @@ def test_db_error_marks_item_and_job_continues(env, monkeypatch):
     assert env.get(second.id).status == "done"
     moved = [h.old_path for h in env.history() if h.action == "moved"]
     assert moved == [str(env.p("Downloads/A/m.mkv")), str(env.p("Downloads/B/m.mkv"))]
+
+
+# --- Abschlussprüfung C1: Aufräumen nach dem Ausführen -------------------------------------
+
+
+def test_execute_keeps_folder_with_small_real_episode(env):
+    small = write(env.p("Downloads/Show.S01/Show.S01E05.mkv"), b"x" * 50)  # kleiner als die Sample-Grenze
+    item = env.item("Downloads/Show.S01/Show.S01E04.mkv", "Serien/Show (2008)/Staffel 1/Show - S01E04.mkv")
+    r = run(env, item)
+    assert r.done == 1 and small.exists()
+    assert "folder_deleted" not in [h.action for h in env.history()]
+
+
+def test_execute_keeps_folder_with_mpg_episode(env):
+    mpg = write(env.p("Downloads/Show.S01/Show.S01E06.mpg"), b"x" * 5000)
+    item = env.item("Downloads/Show.S01/Show.S01E04.mkv", "Serien/Show (2008)/Staffel 1/Show - S01E04.mkv")
+    assert run(env, item).done == 1 and mpg.exists()
+
+
+def test_execute_keeps_folder_with_fresh_file(env):
+    env.settings.min_age_minutes = 10
+    nfo = write(env.p("Downloads/Rel/m.nfo"))
+    item = env.item_to_filme_2d()
+    r = execute(env.sf, [item.id], settings=env.settings, job_id=1, now=lambda: nfo.stat().st_mtime + 60)
+    assert r.done == 1 and nfo.exists()

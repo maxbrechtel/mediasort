@@ -516,3 +516,17 @@ def test_replan_refuses_done_and_ignored_items(env):
         with pytest.raises(ValueError, match="nicht korrigiert"):
             replan_item(env.ctx, it.id, tmdb_ref=("movie", "603"))
     assert env.item(it.id).status == "ignored"
+
+
+# --- Abschlussprüfung C1 ------------------------------------------------------------
+
+
+def test_small_video_is_reported_in_scan_errors(env):
+    env.settings.sample_bytes = 100
+    small = env.file("Downloads/Show.S01/Show.S01E05.mkv", content=b"x" * 50)
+    env.file("Downloads/The.Matrix.1999/m.mkv", content=b"x" * 500)
+    result = env.plan("Downloads")
+    assert [i.source for i in result.items()] == [env.p("Downloads/The.Matrix.1999/m.mkv")]
+    with env.sm() as s:
+        scan = s.get(Scan, result.scan_id)
+    assert scan.errors_json == [f"Kleine Videodatei übersprungen (unter Sample-Grenze): {small}"]
