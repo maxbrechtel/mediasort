@@ -2,12 +2,13 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
-from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import FormData
 
 from mediasort.db import Folder, Item, LibraryEntry
 from mediasort.models import ItemStatus
@@ -16,6 +17,7 @@ from mediasort.settings import save_settings
 from mediasort.web.forms import (
     FormError,
     parse_folder_form,
+    parse_folder_options,
     parse_settings_form,
     settings_form_values,
     submitted_values,
@@ -24,8 +26,18 @@ from mediasort.web.templating import is_htmx, render
 
 router = APIRouter()
 
+BUSY_FOLDERS = ("Es läuft gerade ein Auftrag. Ordner können erst danach entfernt "
+                "oder ihre Ziele geändert werden.")
 _TARGET_COLUMNS = ("movie_target_id", "series_target_id", "movie3d_target_id")
 _UNFINISHED = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value, ItemStatus.ERROR.value)
+
+
+async def _form(request: Request) -> FormData:
+    """Liest das Formular asynchron, damit die Handler selbst synchron (im Threadpool) laufen können."""
+    return await request.form()
+
+
+Form = Annotated[FormData, Depends(_form)]
 
 
 @dataclass
@@ -48,14 +60,17 @@ def _settings_page(request: Request, *, status_code: int = 200, values=None, **c
     )
 
 
+def _library_ids(s: Session) -> set[int]:
+    return set(s.scalars(select(Folder.id).where(Folder.role == "library")))
+
+
 @router.get("/settings")
 def settings_page(request: Request):
     return _settings_page(request)
 
 
 @router.post("/settings")
-async def save_settings_form(request: Request):
-    form = await request.form()
+def save_settings_form(request: Request, form: Form):
     current = request.app.state.services.settings()
     try:
         new = parse_settings_form(form, current)
@@ -67,17 +82,35 @@ async def save_settings_form(request: Request):
 
 
 @router.post("/settings/folders")
-async def add_folder(request: Request):
-    form = await request.form()
+def add_folder(request: Request, form: Form):
     with request.app.state.sf() as s:
-        library_ids = set(s.scalars(select(Folder.id).where(Folder.role == "library")))
         try:
-            fields = parse_folder_form(form, library_ids)
+            fields = parse_folder_form(form, _library_ids(s))
             if s.scalars(select(Folder).where(Folder.path == fields["path"])).first() is not None:
                 raise FormError(f"Der Ordner {fields['path']} ist bereits eingetragen")
         except FormError as exc:
             return _settings_page(request, status_code=400, folder_error=str(exc))
         s.add(Folder(**fields))
+        s.commit()
+    return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/settings/folders/{folder_id}")
+def edit_folder(request: Request, folder_id: int, form: Form):
+    """Typ, Automatik-Stufe und Ziele ändern; Pfad und Rolle bleiben, offene Vorschläge auch."""
+    with request.app.state.sf() as s:
+        folder = s.get(Folder, folder_id)
+        if folder is None:
+            raise HTTPException(404, "Ordner nicht gefunden")
+        try:
+            options = parse_folder_options(form, folder.role, _library_ids(s))
+        except FormError as exc:
+            return _settings_page(request, status_code=400, folder_error=str(exc))
+        targets_change = any(getattr(folder, c) != options[c] for c in _TARGET_COLUMNS)
+        if targets_change and request.app.state.runner.busy():
+            return _settings_page(request, status_code=409, folder_error=BUSY_FOLDERS)
+        for name, value in options.items():
+            setattr(folder, name, value)
         s.commit()
     return RedirectResponse("/settings", status_code=303)
 
@@ -103,8 +136,11 @@ def delete_folder(s: Session, folder_id: int) -> bool:
 @router.post("/settings/folders/{folder_id}/delete")
 def remove_folder(request: Request, folder_id: int):
     with request.app.state.sf() as s:
-        if not delete_folder(s, folder_id):
+        if s.get(Folder, folder_id) is None:
             raise HTTPException(404, "Ordner nicht gefunden")
+        if request.app.state.runner.busy():
+            return _settings_page(request, status_code=409, folder_error=BUSY_FOLDERS)
+        delete_folder(s, folder_id)
     return RedirectResponse("/settings", status_code=303)
 
 
@@ -121,14 +157,12 @@ def run_plex_test(client: PlexClient | None, library_roots: list[Path]) -> PlexT
 
 
 @router.post("/settings/plex/test")
-async def plex_test(request: Request):
-    form = await request.form()
+def plex_test(request: Request, form: Form):
     services = request.app.state.services
     saved = services.settings()
     url = str(form.get("plex_url", saved.plex_url)).strip()
     token = str(form.get("plex_token", saved.plex_token)).strip()
-    client = services.plex_client_for(url, token)
-    result = await run_in_threadpool(run_plex_test, client, services.library_roots())
+    result = run_plex_test(services.plex_client_for(url, token), services.library_roots())
     if is_htmx(request):
         return render(request, "_plex_test.html", plex_test=result)
     return _settings_page(request, values=submitted_values(form, saved), plex_test=result)

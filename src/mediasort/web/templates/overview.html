@@ -19,7 +19,7 @@
       {% for row in inputs %}
         <tr>
           <td data-label="Ordner"><code>{{ row.folder.path }}</code></td>
-          <td class="num">{{ row.open_count }}</td>
+          <td class="num" data-label="Offene Vorschläge">{{ row.open_count }}</td>
           <td data-label="Automatik">{{ AUTO_LEVELS.get(row.folder.auto_level, row.folder.auto_level) }}</td>
           <td>
             <form method="post" action="/scan/{{ row.folder.id }}"

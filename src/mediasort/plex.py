@@ -32,15 +32,22 @@ class PlexError(Exception):
 
 
 class PlexClient:
-    def __init__(self, base_url: str, token: str, transport: httpx.BaseTransport | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        transport: httpx.BaseTransport | None = None,
+        timeout: float = TIMEOUT_S,
+    ):
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._transport = transport
+        self._timeout = timeout
 
     def _get(self, path: str, params: dict[str, str] | None = None) -> httpx.Response:
         headers = {"Accept": "application/json", "X-Plex-Token": self._token}
         try:
-            with httpx.Client(transport=self._transport, timeout=TIMEOUT_S) as http:
+            with httpx.Client(transport=self._transport, timeout=self._timeout) as http:
                 response = http.get(self._base_url + path, params=params, headers=headers)
         except httpx.HTTPError as exc:
             raise PlexError(UNREACHABLE_PREFIX + (str(exc) or type(exc).__name__)) from exc

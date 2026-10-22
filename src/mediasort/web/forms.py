@@ -124,15 +124,9 @@ def _target(form: FormData, name: str, library_ids: Collection[int]) -> int | No
     return int(raw)
 
 
-def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
-    """Felder für eine neue ``Folder``-Zeile; Bibliotheken haben weder Ziele noch Automatik."""
-    raw_path = str(form.get("path", "")).strip()
-    if not raw_path.startswith("/"):
-        raise FormError("Bitte einen absoluten Pfad angeben (beginnt mit /)")
-    role = _choice(form, "role", ROLES, "Rolle", "input")
-    fields = {
-        "path": str(PurePosixPath(raw_path)),
-        "role": role,
+def parse_folder_options(form: FormData, role: str, library_ids: Collection[int]) -> dict:
+    """Änderbare Felder eines Ordners; Bibliotheken haben weder Ziele noch Automatik."""
+    options = {
         "media_type": _choice(form, "media_type", [t.value for t in FolderType], "Typ", FolderType.AUTO),
         "auto_level": _choice(form, "auto_level", [a.value for a in AutoLevel], "Automatik", AutoLevel.OFF),
         "movie_target_id": _target(form, "movie_target_id", library_ids),
@@ -140,6 +134,16 @@ def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
         "movie3d_target_id": _target(form, "movie3d_target_id", library_ids),
     }
     if role == "library":
-        fields.update(movie_target_id=None, series_target_id=None, movie3d_target_id=None,
-                      auto_level=AutoLevel.OFF.value)
-    return fields
+        options.update(movie_target_id=None, series_target_id=None, movie3d_target_id=None,
+                       auto_level=AutoLevel.OFF.value)
+    return options
+
+
+def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
+    """Felder für eine neue ``Folder``-Zeile."""
+    raw_path = str(form.get("path", "")).strip()
+    if not raw_path.startswith("/"):
+        raise FormError("Bitte einen absoluten Pfad angeben (beginnt mit /)")
+    role = _choice(form, "role", ROLES, "Rolle", "input")
+    return {"path": str(PurePosixPath(raw_path)), "role": role,
+            **parse_folder_options(form, role, library_ids)}

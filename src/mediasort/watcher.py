@@ -42,7 +42,7 @@ class Watcher:
         session_factory: Callable[[], Session],
         runner: JobRunner,
         plan: Callable[[Folder, bool], int],
-        run_items: Callable[[list[int], bool, int | None], None],
+        run_items: Callable[[list[int], bool, int | None], list[str] | None],
         now: Callable[[], float],
     ):
         self._sf = session_factory
@@ -89,12 +89,11 @@ class Watcher:
 
         candidates = self._observe(folders, min_age_s=settings.min_age_minutes * 60)
         ids = self._confirm(candidates) if candidates else []
-        if ids:
-            self._run_items(ids, True, job_id)
+        hints = (self._run_items(ids, True, job_id) or []) if ids else []
 
         noun = "neuer Vorschlag" if new == 1 else "neue Vorschläge"
         parts = [f"{checked} Ordner geprüft, {new} {noun}, {len(ids)} automatisch einsortiert"]
-        return "; ".join(parts + errors)
+        return "; ".join(parts + errors + hints)
 
     def _auto_enabled(self) -> bool:
         with self._sf() as s:

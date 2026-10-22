@@ -9,8 +9,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from conftest import A, MI
-from mediasort.db import Folder, History, Item, Job, Scan
+from mediasort.db import FileState, Folder, History, Item, Job, Scan
 from mediasort.settings import Settings, load_settings, save_settings
+from mediasort.web import app as web_app
 from mediasort.web.app import create_app, poll_loop
 from mediasort.web.forms import FormError, format_path_map, parse_path_map
 
@@ -42,10 +43,16 @@ class PlexServer:
         self.auto_empty_trash = auto_empty_trash
         self.reachable = reachable
         self.refreshed: list[tuple[str, str]] = []
+        self.status = 200  # Fehlerstatus für alle Anfragen
+        self.refresh_status = 200
+        self.timeouts: list[float] = []  # Lese-Timeout je Anfrage
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.timeouts.append(request.extensions["timeout"]["read"])
         if not self.reachable:
             raise httpx.ConnectError("Verbindung abgelehnt", request=request)
+        if self.status != 200:
+            return httpx.Response(self.status)
         path = request.url.path
         if path == "/library/sections":
             return httpx.Response(200, json=json.loads((PLEX_FIXTURES / "sections.json").read_text()))
@@ -58,7 +65,7 @@ class PlexServer:
         if path.endswith("/refresh"):
             key = path.split("/")[3]
             self.refreshed.append((key, request.url.params["path"]))
-            return httpx.Response(200)
+            return httpx.Response(self.refresh_status)
         return httpx.Response(404)
 
 
@@ -179,7 +186,7 @@ def test_overview_auto_level_open_count_and_last_auto_job(client):
         s.commit()
     text = client.get("/").text
     assert "Nur erkennen" in text
-    assert '<td class="num">2</td>' in text  # neu + bestätigt
+    assert '<td class="num" data-label="Offene Vorschläge">2</td>' in text  # neu + bestätigt
     assert "1 Ordner geprüft, 0 neue Vorschläge" in text
     assert "/y/neu.mkv" in text and "verschoben" in text
 
@@ -235,7 +242,7 @@ def test_scan_starts_job_and_reports(client, media_tree):
         job = s.scalars(select(Job)).one()
         assert (job.kind, job.status, job.auto) == ("scan", "done", False)
         assert s.scalars(select(Scan)).one().auto is False
-    assert '<td class="num">2</td>' in client.get("/").text
+    assert '<td class="num" data-label="Offene Vorschläge">2</td>' in client.get("/").text
 
 
 def test_scan_htmx_returns_job_fragment(client, media_tree):
@@ -480,3 +487,174 @@ def test_path_map_helpers():
     assert format_path_map([("/a", "/b")]) == "/a => /b"
     with pytest.raises(FormError):
         parse_path_map("/a => ")
+
+
+# --- Nachbesserungen (Review-Runde 1) ------------------------------------------------------
+
+
+def test_poll_loop_survives_interval_error():
+    sleeps, triggered = [], []
+    answers = iter([RuntimeError("Datenbank gesperrt"), 5, RuntimeError("wieder"), 7])
+
+    def minutes():
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 4:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(poll_loop(minutes, lambda: triggered.append(True) or "gestartet", sleep=fake_sleep))
+    assert sleeps == [900, 300, 300, 420]  # Standard 15, dann der zuletzt gelesene Wert
+    assert len(triggered) == 3
+
+
+def test_shutdown_survives_crashed_poll_task(tmp_path, monkeypatch):
+    async def crashing(*args, **kwargs):
+        raise RuntimeError("kaputt")
+
+    monkeypatch.setattr(web_app, "poll_loop", crashing)
+    app = create_app(tmp_path / "config", probe=lambda p: INFO, start_background=True)
+    with TestClient(app) as c:
+        assert c.get("/").status_code == 200
+    thread = app.state.runner._thread
+    assert thread is None or not thread.is_alive()
+
+
+def auto_setup(env) -> None:
+    env.settings(auto_enabled=True)
+    with env.app.state.sf() as s:
+        s.get(Folder, env.downloads_id).auto_level = "auto"
+        s.commit()
+
+
+def run_trigger(client) -> Job:
+    assert client.app.state.watcher.trigger() == "gestartet"
+    assert client.app.state.runner.wait_idle(10)
+    with client.app.state.sf() as s:
+        return s.scalars(select(Job).order_by(Job.id.desc())).first()
+
+
+def test_auto_run_end_to_end(client_with_plex, media_tree):
+    env = client_with_plex.env
+    auto_setup(env)
+    env.settings(plex_path_map=[(str(env.media / "Filme_2D"), "/media/Filme_2D")])
+    first = run_trigger(client_with_plex)
+    assert (first.kind, first.status, first.auto) == ("auto", "done", True)
+    assert first.message == "1 Ordner geprüft, 2 neue Vorschläge, 0 automatisch einsortiert"
+    second = run_trigger(client_with_plex)  # Dateien unverändert: jetzt stabil
+    assert second.id != first.id and second.kind == "auto" and second.status == "done"
+    assert second.message == "1 Ordner geprüft, 0 neue Vorschläge, 1 automatisch einsortiert"
+    with env.app.state.sf() as s:
+        assert len(s.scalars(select(Job)).all()) == 2
+        assert all(scan.auto for scan in s.scalars(select(Scan)))
+        matrix = s.scalars(select(Item).where(Item.tmdb_id == 603)).one()
+        assert matrix.status == "done" and Path(matrix.target).is_file()
+        history = s.scalars(select(History)).all()
+        assert history and all(h.auto and h.job_id == second.id for h in history)
+        assert s.scalars(select(FileState)).first() is not None
+    assert ("1", "/media/Filme_2D/Matrix (1999)") in env.plex.refreshed
+    assert "1 automatisch einsortiert" in client_with_plex.get("/").text
+
+
+def test_auto_run_reports_plex_hint(client_with_plex, media_tree):
+    env = client_with_plex.env
+    auto_setup(env)
+    env.settings(plex_path_map=[(str(env.media / "Filme_2D"), "/media/Filme_2D")])
+    run_trigger(client_with_plex)
+    env.plex.refresh_status = 500
+    job = run_trigger(client_with_plex)
+    assert job.status == "done"
+    assert job.message.endswith("1 automatisch einsortiert; Plex-Fehler: HTTP 500")
+
+
+def test_overview_plex_check_uses_short_timeout(client_with_plex):
+    client_with_plex.get("/")
+    assert client_with_plex.env.plex.timeouts and set(client_with_plex.env.plex.timeouts) == {3.0}
+
+
+def test_overview_plex_http_error(client_with_plex):
+    client_with_plex.env.plex.status = 401
+    text = client_with_plex.get("/").text
+    assert "Plex-Fehler: HTTP 401" in text and "nicht erreichbar" not in text
+
+
+def test_job_fragment_requests_refresh_when_finished(client, media_tree):
+    hx = {"HX-Request": "true"}
+    release = block_runner(client)
+    try:
+        assert "HX-Refresh" not in client.get("/jobs/current", headers=hx).headers
+    finally:
+        release.set()
+    assert client.app.state.runner.wait_idle(10)
+    assert client.get("/jobs/current", headers=hx).headers.get("HX-Refresh") == "true"
+    assert "HX-Refresh" not in client.get("/jobs/current").headers
+
+
+def test_open_count_cell_has_label(client):
+    assert 'data-label="Offene Vorschläge"' in client.get("/").text
+
+
+EDIT = {"media_type": "movie", "auto_level": "auto", "movie_target_id": "", "series_target_id": "",
+        "movie3d_target_id": ""}
+
+
+def test_folder_edit_keeps_open_items(client):
+    env = client.env
+    with env.app.state.sf() as s:
+        ser_id = s.scalars(select(Folder.id).where(Folder.path.endswith("Serien"))).one()
+        s.add(Item(folder_id=env.downloads_id, source="/x/a.mkv", size=1, mtime=1.0, status="new"))
+        s.commit()
+    r = client.post(f"/settings/folders/{env.downloads_id}", follow_redirects=False, data={
+        **EDIT, "series_target_id": str(ser_id), "path": "/anders", "role": "library"})
+    assert r.status_code == 303 and r.headers["location"] == "/settings"
+    with env.app.state.sf() as s:
+        f = s.get(Folder, env.downloads_id)
+        assert (f.path, f.role) == (str(env.media / "Downloads"), "input")  # nicht änderbar
+        assert (f.media_type, f.auto_level) == ("movie", "auto")
+        assert (f.movie_target_id, f.series_target_id, f.movie3d_target_id) == (None, ser_id, None)
+        assert len(s.scalars(select(Item)).all()) == 1
+    page = client.get("/settings").text
+    assert f'action="/settings/folders/{env.downloads_id}"' in page
+
+
+def test_folder_edit_library_and_errors(client):
+    env = client.env
+    client.post(f"/settings/folders/{env.filme_id}", data={**EDIT, "movie_target_id": str(env.filme_id)})
+    with env.app.state.sf() as s:
+        f = s.get(Folder, env.filme_id)
+        assert (f.media_type, f.auto_level, f.movie_target_id) == ("movie", "off", None)
+    assert client.post("/settings/folders/999", data=EDIT).status_code == 404
+    r = client.post(f"/settings/folders/{env.downloads_id}", data={**EDIT, "auto_level": "immer"})
+    assert r.status_code == 400 and "Automatik" in r.text
+
+
+def test_folder_changes_refused_while_busy(client):
+    env = client.env
+    release = block_runner(client)
+    try:
+        r = client.post(f"/settings/folders/{env.filme_id}/delete")
+        assert r.status_code == 409 and "läuft gerade ein Auftrag" in r.text
+        r = client.post(f"/settings/folders/{env.downloads_id}", data=EDIT)  # Ziele würden entfallen
+        assert r.status_code == 409 and "läuft gerade ein Auftrag" in r.text
+        with env.app.state.sf() as s:
+            current = s.get(Folder, env.downloads_id)
+            same_targets = {k: str(getattr(current, k)) for k in
+                            ("movie_target_id", "series_target_id", "movie3d_target_id")}
+        r = client.post(f"/settings/folders/{env.downloads_id}", follow_redirects=False,
+                        data={**EDIT, **same_targets, "auto_level": "detect"})
+        assert r.status_code == 303  # Automatik-Stufe darf sich ändern
+    finally:
+        release.set()
+    assert client.app.state.runner.wait_idle(10)
+    with env.app.state.sf() as s:
+        assert s.get(Folder, env.filme_id) is not None
+        assert s.get(Folder, env.downloads_id).auto_level == "detect"
+
+
+def test_delete_button_asks_for_confirmation(client):
+    assert 'onsubmit="return confirm(' in client.get("/settings").text

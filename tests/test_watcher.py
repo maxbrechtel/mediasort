@@ -70,6 +70,7 @@ class Env:
         self.submitted = []
         self.ran_jobs: list[int | None] = []
         self.ran_status: list[str] = []  # Status der Items beim Aufruf von run_items
+        self.run_hints: list[str] = []  # Hinweise, die run_items zurückgibt (z. B. Plex)
 
     # Konfiguration
     def settings(self, **kw):
@@ -133,7 +134,7 @@ class Env:
             effect(folder, scan_id)
         return scan_id
 
-    def run_items(self, ids: list[int], auto: bool, job_id: int | None) -> None:
+    def run_items(self, ids: list[int], auto: bool, job_id: int | None) -> list[str] | None:
         self.ran.append((list(ids), auto))
         self.ran_jobs.append(job_id)
         with self.sm() as s:
@@ -142,6 +143,7 @@ class Env:
                 self.ran_status.append(it.status)
                 it.status = "done"
             s.commit()
+        return list(self.run_hints) or None
 
     def status(self, item_id: int) -> str:
         with self.sm() as s:
@@ -254,6 +256,17 @@ def test_tick_auto_includes_items_from_this_ticks_plan_only_when_stable(env, w):
     env.clock.t += 900
     assert w.tick() == "1 Ordner geprüft, 0 neue Vorschläge, 1 automatisch einsortiert"
     assert len(env.ran) == 1
+
+
+def test_tick_appends_hints_from_run_items(env, w):
+    env.settings(auto_enabled=True, min_age_minutes=0)
+    fid = env.folder("in", auto_level="auto")
+    p = env.file("in/a.mkv")
+    env.item(fid, p)
+    env.state(p)
+    env.run_hints = ["Plex nicht erreichbar: Verbindung abgelehnt"]
+    assert w.tick() == ("1 Ordner geprüft, 0 neue Vorschläge, 1 automatisch einsortiert; "
+                        "Plex nicht erreichbar: Verbindung abgelehnt")
 
 
 def test_tick_missing_file_is_skipped(env, w):

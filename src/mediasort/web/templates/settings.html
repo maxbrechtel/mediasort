@@ -6,11 +6,18 @@
   <input type="checkbox" name="{{ name }}" value="1"{% if values[name] %} checked{% endif %}> {{ label }}
 </label>
 {% endmacro %}
-{% macro target_select(name, label) %}
+{% macro target_select(name, label, selected=none) %}
 <label>{{ label }}
   <select name="{{ name }}">
     <option value="">– keins –</option>
-    {% for lib in libraries %}<option value="{{ lib.id }}">{{ lib.path }}</option>{% endfor %}
+    {% for lib in libraries %}<option value="{{ lib.id }}"{% if lib.id == selected %} selected{% endif %}>{{ lib.path }}</option>{% endfor %}
+  </select>
+</label>
+{% endmacro %}
+{% macro choice_select(name, label, options, selected) %}
+<label>{{ label }}
+  <select name="{{ name }}">
+    {% for value, text in options.items() %}<option value="{{ value }}"{% if value == selected %} selected{% endif %}>{{ text }}</option>{% endfor %}
   </select>
 </label>
 {% endmacro %}
@@ -86,8 +93,22 @@
           {% else %}–{% endif %}
         </td>
         <td data-label="Automatik">{{ AUTO_LEVELS.get(folder.auto_level, folder.auto_level) if folder.role == "input" else "–" }}</td>
-        <td>
-          <form method="post" action="/settings/folders/{{ folder.id }}/delete">
+        <td class="folder-actions">
+          <details>
+            <summary>Bearbeiten</summary>
+            <form method="post" action="/settings/folders/{{ folder.id }}" class="folder-edit">
+              {{ choice_select("media_type", "Typ", MEDIA_TYPES, folder.media_type) }}
+              {% if folder.role == "input" %}
+              {{ choice_select("auto_level", "Automatik", AUTO_LEVELS, folder.auto_level) }}
+              {{ target_select("movie_target_id", "Ziel für Filme", folder.movie_target_id) }}
+              {{ target_select("series_target_id", "Ziel für Serien", folder.series_target_id) }}
+              {{ target_select("movie3d_target_id", "Ziel für 3D-Filme", folder.movie3d_target_id) }}
+              {% endif %}
+              <button type="submit">Übernehmen</button>
+            </form>
+          </details>
+          <form method="post" action="/settings/folders/{{ folder.id }}/delete"
+                onsubmit="return confirm('Diesen Ordner wirklich entfernen? Offene Vorschläge dieses Ordners werden gelöscht.')">
             <button type="submit" class="danger">Entfernen</button>
           </form>
         </td>
@@ -108,16 +129,8 @@
         {% for value, label in ROLES.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
     </label>
-    <label>Typ
-      <select name="media_type">
-        {% for value, label in MEDIA_TYPES.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
-      </select>
-    </label>
-    <label>Automatik (nur Eingang)
-      <select name="auto_level">
-        {% for value, label in AUTO_LEVELS.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
-      </select>
-    </label>
+    {{ choice_select("media_type", "Typ", MEDIA_TYPES, "auto") }}
+    {{ choice_select("auto_level", "Automatik (nur Eingang)", AUTO_LEVELS, "off") }}
     {{ target_select("movie_target_id", "Ziel für Filme") }}
     {{ target_select("series_target_id", "Ziel für Serien") }}
     {{ target_select("movie3d_target_id", "Ziel für 3D-Filme") }}

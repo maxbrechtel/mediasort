@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, History, Item, Job, Scan
 from mediasort.models import ItemStatus
-from mediasort.plex import UNREACHABLE_PREFIX, PlexClient, PlexError
+from mediasort.plex import PlexClient, PlexError
 from mediasort.settings import Settings
 from mediasort.web.templating import is_htmx, render
 
@@ -20,6 +20,8 @@ BUSY = "Es läuft bereits ein Auftrag. Bitte warten, bis er fertig ist."
 NOTICES = {"busy": BUSY}
 _OPEN = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
 RECENT_ACTIONS = 5
+OVERVIEW_PLEX_TIMEOUT_S = 3.0  # die Übersicht soll bei Plex-Ausfall nicht hängen
+_FINISHED = ("done", "error")
 
 
 @dataclass
@@ -48,9 +50,8 @@ def warnings(settings: Settings, libraries: list[Folder], plex: PlexClient | Non
                     "Dateien kurz fehlen. Bitte in Plex „Papierkorb nach jedem Scan automatisch leeren“ "
                     "ausschalten."
                 )
-        except PlexError as exc:
-            message = str(exc)
-            found.append(message if message.startswith(UNREACHABLE_PREFIX) else f"Plex nicht erreichbar ({message})")
+        except PlexError as exc:  # „Plex nicht erreichbar: …“ oder „Plex-Fehler: HTTP …“
+            found.append(str(exc))
     for library in libraries:
         if not Path(library.path).is_dir():
             found.append(f"Bibliotheksordner fehlt: {library.path} (Freigabe nicht eingebunden?)")
@@ -84,7 +85,7 @@ def overview(request: Request, hinweis: str = ""):
     return render(
         request, "overview.html", active="/",
         settings=settings, inputs=inputs, last_auto=last_auto, job=job, recent=recent,
-        warnings=warnings(settings, libraries, services.plex_client(settings)),
+        warnings=warnings(settings, libraries, services.plex_client(settings, OVERVIEW_PLEX_TIMEOUT_S)),
         notice=NOTICES.get(hinweis),
     )
 
@@ -98,12 +99,24 @@ def start_scan(request: Request, folder_id: int):
     job_id = state.runner.submit("scan", lambda job_id, progress: state.services.scan_folder(folder_id))
     notice = BUSY if job_id is None else None
     if is_htmx(request):
-        with state.sf() as s:
-            return render(request, "_job.html", job=latest_job(s), notice=notice)
+        return job_fragment(request, notice)
     return RedirectResponse("/" if notice is None else "/?hinweis=busy", status_code=303)
+
+
+def job_fragment(request: Request, notice: str | None = None):
+    """Fragment des jüngsten Auftrags; ist er (per htmx abgefragt) fertig, lädt die Seite neu.
+
+    Das Fragment fragt nur nach, solange der Auftrag aktiv ist; die Antwort auf die letzte Nachfrage
+    meldet den Abschluss und lässt htmx die Übersicht (offene Vorschläge) neu laden.
+    """
+    with request.app.state.sf() as s:
+        job = latest_job(s)
+        response = render(request, "_job.html", job=job, notice=notice)
+    if is_htmx(request) and notice is None and job is not None and job.status in _FINISHED:
+        response.headers["HX-Refresh"] = "true"
+    return response
 
 
 @router.get("/jobs/current")
 def current_job(request: Request):
-    with request.app.state.sf() as s:
-        return render(request, "_job.html", job=latest_job(s))
+    return job_fragment(request)

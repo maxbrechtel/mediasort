@@ -105,6 +105,10 @@ td form { margin: 0; }
 
 .folder-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
 .folder-form p, .folder-form button { grid-column: 1 / -1; justify-self: start; }
+.folder-actions { display: flex; flex-direction: column; gap: 0.5rem; min-width: 12rem; }
+.folder-actions summary { cursor: pointer; color: var(--accent); }
+.folder-edit { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+.folder-edit button { align-self: flex-start; }
 
 .warnings { list-style: none; padding: 0; margin: 0 0 1rem; }
 .warnings li, .notice {
@@ -136,5 +140,6 @@ progress { width: 60%; vertical-align: middle; }
   table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }
   table.stack tr { border-bottom: 1px solid var(--border); padding: 0.5rem 0; }
   table.stack td { border: none; padding: 0.15rem 0; text-align: left; }
+  table.stack td.folder-actions { display: flex; }
   table.stack td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); }
 }

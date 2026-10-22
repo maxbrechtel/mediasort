@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from mediasort import mediainfo
+from mediasort import mediainfo, plex
 from mediasort.db import DbCache, Folder, Item, Scan, init_db, make_engine
 from mediasort.executor import execute
 from mediasort.jobs import JobRunner
@@ -62,14 +62,14 @@ class Services:
             transport=self._tmdb_transport,
         )
 
-    def plex_client(self, settings: Settings) -> PlexClient | None:
+    def plex_client(self, settings: Settings, timeout: float = plex.TIMEOUT_S) -> PlexClient | None:
         """``None``, solange Adresse oder Token fehlen (Plex ist optional)."""
-        return self.plex_client_for(settings.plex_url, settings.plex_token)
+        return self.plex_client_for(settings.plex_url, settings.plex_token, timeout)
 
-    def plex_client_for(self, url: str, token: str) -> PlexClient | None:
+    def plex_client_for(self, url: str, token: str, timeout: float = plex.TIMEOUT_S) -> PlexClient | None:
         if not url or not token:
             return None
-        return PlexClient(url, token, transport=self._plex_transport)
+        return PlexClient(url, token, transport=self._plex_transport, timeout=timeout)
 
     def library_roots(self) -> list[Path]:
         with self.sf() as s:
@@ -101,12 +101,14 @@ class Services:
             message += f"; {len(errors)} Pfade nicht lesbar"
         return message
 
-    def run_items(self, ids: list[int], auto: bool, job_id: int | None) -> None:
-        """Führt bestätigte Vorschläge im laufenden Auftrag aus und stößt danach Plex an."""
+    def run_items(self, ids: list[int], auto: bool, job_id: int | None) -> list[str]:
+        """Führt bestätigte Vorschläge im laufenden Auftrag aus, stößt danach Plex an; liefert Plex-Hinweise."""
         settings = self.settings()
         report = execute(self.sf, ids, settings=settings, job_id=job_id, auto=auto)
-        for hint in self.refresh_plex(settings, report.touched):
+        hints = self.refresh_plex(settings, report.touched)
+        for hint in hints:
             log.warning("Plex-Teilscan nach Auftrag %s: %s", job_id, hint)
+        return hints
 
     def refresh_plex(self, settings: Settings, touched: Iterable[Path]) -> list[str]:
         """Plex-Teilscans; liefert Hinweise statt Fehler (der Auftrag gilt trotzdem als erfolgreich)."""
@@ -125,16 +127,38 @@ async def poll_loop(
     trigger: Callable[[], str],
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    default_minutes: int = Settings.poll_minutes,
 ) -> None:
-    """Stößt alle ``minutes()`` Minuten (jedes Mal neu gelesen) die Überwachung an."""
+    """Stößt alle ``minutes()`` Minuten (jedes Mal neu gelesen) die Überwachung an.
+
+    Kann das Intervall nicht gelesen werden, gilt der zuletzt gelesene Wert (anfangs ``default_minutes``).
+    """
+    interval = default_minutes
     while True:
-        await sleep(max(1, await asyncio.to_thread(minutes)) * 60)
+        try:
+            interval = max(1, int(await asyncio.to_thread(minutes)))
+        except Exception:
+            log.exception("Abfrageintervall nicht lesbar, verwende %s Minuten", interval)
+        await sleep(interval * 60)
         try:
             result = await asyncio.to_thread(trigger)
         except Exception:
             log.exception("Automatische Abfrage konnte nicht gestartet werden")
         else:
             log.info("Automatische Abfrage: %s", result)
+
+
+async def _stop_task(task: asyncio.Task | None) -> None:
+    """Beendet die Abfrageschleife; ihr eigener Fehler darf das Herunterfahren nicht verhindern."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("Automatische Abfrage ist mit einem Fehler beendet worden")
 
 
 def create_app(
@@ -162,12 +186,13 @@ def create_app(
         try:
             yield
         finally:
-            if app.state.poll_task is not None:
-                app.state.poll_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await app.state.poll_task
-            await asyncio.to_thread(runner.stop)
-            engine.dispose()
+            try:
+                await _stop_task(app.state.poll_task)
+            finally:
+                try:
+                    await asyncio.to_thread(runner.stop)
+                finally:
+                    engine.dispose()
 
     app = FastAPI(title="mediasort", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.sf = sf
