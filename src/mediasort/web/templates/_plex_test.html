@@ -1,0 +1,27 @@
+<div id="plex-test" class="plex-test">
+  {% if plex_test.error %}
+  <p class="error">{{ plex_test.error }}</p>
+  {% else %}
+  <p class="ok">Verbindung zu Plex hergestellt.</p>
+  {% if plex_test.auto_empty_trash %}
+  <p class="notice">Plex leert den Papierkorb automatisch. Bitte in Plex ausschalten.</p>
+  {% endif %}
+  <h3>Bibliotheken in Plex</h3>
+  <ul>
+    {% for section in plex_test.sections %}
+    <li><strong>{{ section.title }}</strong> ({{ section.type }}): {% for loc in section.locations %}<code>{{ loc }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</li>
+    {% else %}
+    <li class="muted">keine</li>
+    {% endfor %}
+  </ul>
+  <h3>Vorgeschlagene Pfadzuordnung</h3>
+  {% if plex_test.mapping %}
+  <ul>
+    {% for local, remote in plex_test.mapping %}<li><code>{{ local }} → {{ remote }}</code></li>{% endfor %}
+  </ul>
+  <p class="muted">Zum Übernehmen im Feld „Pfadzuordnung“ eintragen, je Zeile <code>lokal =&gt; plex</code>.</p>
+  {% else %}
+  <p class="muted">Kein Vorschlag: keine Bibliothek mit gleichem Ordnernamen gefunden.</p>
+  {% endif %}
+  {% endif %}
+</div>

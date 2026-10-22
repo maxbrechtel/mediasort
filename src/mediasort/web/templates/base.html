@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}mediasort{% endblock %} – mediasort</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">mediasort</a>
+    <nav>
+      {% for href, label in [("/", "Übersicht"), ("/review", "Prüfliste"), ("/library", "Bibliothek prüfen"),
+                             ("/history", "Verlauf"), ("/ignored", "Ignoriert"), ("/settings", "Einstellungen")] %}
+      <a href="{{ href }}"{% if active == href %} aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

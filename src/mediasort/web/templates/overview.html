@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Übersicht{% endblock %}
+{% block content %}
+<h1>Übersicht</h1>
+
+{% if warnings %}
+<ul class="warnings">
+  {% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<div class="grid">
+  <section class="card wide">
+    <h2>Eingangsordner</h2>
+    {% if inputs %}
+    <table class="stack">
+      <thead><tr><th>Ordner</th><th class="num">Offene Vorschläge</th><th>Automatik</th><th></th></tr></thead>
+      <tbody>
+      {% for row in inputs %}
+        <tr>
+          <td data-label="Ordner"><code>{{ row.folder.path }}</code></td>
+          <td class="num">{{ row.open_count }}</td>
+          <td data-label="Automatik">{{ AUTO_LEVELS.get(row.folder.auto_level, row.folder.auto_level) }}</td>
+          <td>
+            <form method="post" action="/scan/{{ row.folder.id }}"
+                  hx-post="/scan/{{ row.folder.id }}" hx-target="#current-job" hx-swap="outerHTML">
+              <button type="submit">Scannen</button>
+            </form>
+          </td>
+        </tr>
+        {% if row.scan_errors %}
+        <tr class="scan-errors">
+          <td colspan="4">
+            <strong>Beim letzten Scan nicht lesbar:</strong>
+            <ul>{% for error in row.scan_errors %}<li>{{ error }}</li>{% endfor %}</ul>
+          </td>
+        </tr>
+        {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+    <p><a href="/review">Zur Prüfliste</a></p>
+    {% else %}
+    <p class="muted">Noch keine Eingangsordner eingetragen. <a href="/settings">Ordner in den Einstellungen anlegen</a>.</p>
+    {% endif %}
+  </section>
+
+  {% include "_job.html" %}
+
+  <section class="card">
+    <h2>Automatik</h2>
+    <p>Hauptschalter: <strong>{{ "an" if settings.auto_enabled else "aus" }}</strong>,
+       Abfrage alle {{ settings.poll_minutes }} Minuten</p>
+    {% if last_auto %}
+    <p>Letzte Abfrage: {{ (last_auto.finished or last_auto.started) | zeit }}
+       <span class="badge status-{{ last_auto.status }}">{{ JOB_STATUSES.get(last_auto.status, last_auto.status) }}</span></p>
+    {% if last_auto.message %}<p>{{ last_auto.message }}</p>{% endif %}
+    {% else %}
+    <p class="muted">Noch keine automatische Abfrage.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Letzte Aktionen</h2>
+    {% if recent %}
+    <ul class="actions">
+      {% for entry in recent %}
+      <li>
+        <span class="muted">{{ entry.ts | zeit }}</span> {{ ACTIONS.get(entry.action, entry.action) }}{% if entry.auto %} (automatisch){% endif %}:
+        <code>{{ entry.old_path }}</code>{% if entry.new_path %} → <code>{{ entry.new_path }}</code>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <p><a href="/history">Ganzer Verlauf</a></p>
+    {% else %}
+    <p class="muted">Noch nichts ausgeführt.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

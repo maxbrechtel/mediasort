@@ -1,0 +1,19 @@
+{% set active_job = job is not none and job.status in ("queued", "running") %}
+<section id="current-job" class="card"{% if active_job %} hx-get="/jobs/current" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  <h2>Aktueller Auftrag</h2>
+  {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+  {% if job is none %}
+  <p class="muted">Noch kein Auftrag.</p>
+  {% else %}
+  <p>
+    <strong>{{ JOB_KINDS.get(job.kind, job.kind) }}</strong>
+    <span class="badge status-{{ job.status }}">{{ JOB_STATUSES.get(job.status, job.status) }}</span>
+    {% if job.auto %}<span class="badge">automatisch</span>{% endif %}
+  </p>
+  {% if job.total %}
+  <p><progress value="{{ job.progress }}" max="{{ job.total }}"></progress> {{ job.progress }} / {{ job.total }}</p>
+  {% endif %}
+  {% if job.message %}<p class="{{ 'error' if job.status == 'error' else '' }}">{{ job.message }}</p>{% endif %}
+  <p class="muted">Start: {{ job.started | zeit }}{% if job.finished %} · Ende: {{ job.finished | zeit }}{% endif %}</p>
+  {% endif %}
+</section>

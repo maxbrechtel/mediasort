@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Einstellungen{% endblock %}
+{% macro checkbox(name, label) %}
+<label class="check">
+  <input type="hidden" name="{{ name }}" value="0">
+  <input type="checkbox" name="{{ name }}" value="1"{% if values[name] %} checked{% endif %}> {{ label }}
+</label>
+{% endmacro %}
+{% macro target_select(name, label) %}
+<label>{{ label }}
+  <select name="{{ name }}">
+    <option value="">– keins –</option>
+    {% for lib in libraries %}<option value="{{ lib.id }}">{{ lib.path }}</option>{% endfor %}
+  </select>
+</label>
+{% endmacro %}
+{% block content %}
+<h1>Einstellungen</h1>
+
+<form method="post" action="/settings" class="settings">
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <div class="grid">
+    <fieldset class="card">
+      <legend>TMDB</legend>
+      <label>TMDB-Schlüssel (API-Schlüssel oder Lese-Token)
+        <input type="text" name="tmdb_key" value="{{ values.tmdb_key }}" autocomplete="off"></label>
+      <label>Sprache
+        <input type="text" name="language" value="{{ values.language }}" required></label>
+      <label>TMDB-Cache (Tage)
+        <input type="number" name="cache_days" value="{{ values.cache_days }}" min="1"></label>
+    </fieldset>
+
+    <fieldset class="card">
+      <legend>Benennung und Scan</legend>
+      <label>Staffelbezeichnung
+        <input type="text" name="season_label" value="{{ values.season_label }}" required></label>
+      <label>Sample-Grenze (MB) – kleinere Videos gelten als Sample
+        <input type="number" name="sample_mb" value="{{ values.sample_mb }}" min="0"></label>
+      <label>Mindestalter neuer Dateien (Minuten)
+        <input type="number" name="min_age_minutes" value="{{ values.min_age_minutes }}" min="0"></label>
+      <label>Ausschlussliste (ein Name pro Zeile)
+        <textarea name="exclude" rows="6">{{ values.exclude }}</textarea></label>
+    </fieldset>
+
+    <fieldset class="card">
+      <legend>Automatik</legend>
+      {{ checkbox("auto_enabled", "Automatik eingeschaltet (Hauptschalter)") }}
+      <label>Abfrageintervall (Minuten)
+        <input type="number" name="poll_minutes" value="{{ values.poll_minutes }}" min="1"></label>
+    </fieldset>
+
+    <fieldset class="card">
+      <legend>Plex (optional)</legend>
+      <label>Adresse
+        <input type="url" name="plex_url" value="{{ values.plex_url }}" placeholder="http://plex:32400"></label>
+      <label>Token
+        <input type="text" name="plex_token" value="{{ values.plex_token }}" autocomplete="off"></label>
+      <label>Pfadzuordnung (je Zeile <code>lokal =&gt; plex</code>)
+        <textarea name="plex_path_map" rows="4">{{ values.plex_path_map }}</textarea></label>
+      {{ checkbox("confirmed_trash_warning", "Papierkorb-Warnung für „Bibliothek prüfen“ bestätigt") }}
+      <button type="submit" formaction="/settings/plex/test" class="secondary"
+              hx-post="/settings/plex/test" hx-include="[name=plex_url],[name=plex_token]"
+              hx-target="#plex-test" hx-swap="outerHTML">Plex testen</button>
+      {% if plex_test %}{% include "_plex_test.html" %}{% else %}<div id="plex-test"></div>{% endif %}
+    </fieldset>
+  </div>
+  <p><button type="submit">Speichern</button></p>
+</form>
+
+<section class="card">
+  <h2>Ordner</h2>
+  {% if folders %}
+  <table class="stack">
+    <thead><tr><th>Pfad</th><th>Rolle</th><th>Typ</th><th>Ziele</th><th>Automatik</th><th></th></tr></thead>
+    <tbody>
+    {% for folder in folders %}
+      <tr>
+        <td data-label="Pfad"><code>{{ folder.path }}</code></td>
+        <td data-label="Rolle">{{ ROLES.get(folder.role, folder.role) }}</td>
+        <td data-label="Typ">{{ MEDIA_TYPES.get(folder.media_type, folder.media_type) }}</td>
+        <td data-label="Ziele">
+          {% if folder.role == "input" %}
+          {% for column, label in [("movie_target_id", "Filme"), ("series_target_id", "Serien"), ("movie3d_target_id", "3D-Filme")] %}
+            <div>{{ label }}: {% if folder|attr(column) %}<code>{{ paths.get(folder|attr(column), "?") }}</code>{% else %}–{% endif %}</div>
+          {% endfor %}
+          {% else %}–{% endif %}
+        </td>
+        <td data-label="Automatik">{{ AUTO_LEVELS.get(folder.auto_level, folder.auto_level) if folder.role == "input" else "–" }}</td>
+        <td>
+          <form method="post" action="/settings/folders/{{ folder.id }}/delete">
+            <button type="submit" class="danger">Entfernen</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Noch keine Ordner eingetragen.</p>
+  {% endif %}
+
+  <h3>Ordner hinzufügen</h3>
+  {% if folder_error %}<p class="error">{{ folder_error }}</p>{% endif %}
+  <form method="post" action="/settings/folders" class="folder-form">
+    <label>Pfad <input type="text" name="path" placeholder="/media/Downloads" required></label>
+    <label>Rolle
+      <select name="role">
+        {% for value, label in ROLES.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Typ
+      <select name="media_type">
+        {% for value, label in MEDIA_TYPES.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Automatik (nur Eingang)
+      <select name="auto_level">
+        {% for value, label in AUTO_LEVELS.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    {{ target_select("movie_target_id", "Ziel für Filme") }}
+    {{ target_select("series_target_id", "Ziel für Serien") }}
+    {{ target_select("movie3d_target_id", "Ziel für 3D-Filme") }}
+    <p class="muted">Ziele gelten nur für Eingangsordner. Bibliotheken zuerst anlegen, dann die Eingangsordner.</p>
+    <button type="submit">Hinzufügen</button>
+  </form>
+</section>
+{% endblock %}

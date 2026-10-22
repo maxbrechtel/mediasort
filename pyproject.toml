@@ -20,13 +20,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-timeout"]
+test = ["pytest", "pytest-timeout", "httpx2"]
 
 [project.scripts]
 mediasort = "mediasort.web.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"mediasort.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
