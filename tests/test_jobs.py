@@ -117,3 +117,24 @@ def test_submit_before_start_stays_queued(sf):
 
 def test_wait_idle_when_idle(runner):
     assert runner.wait_idle(0)
+
+
+def test_start_aborts_stale_jobs_from_previous_process(sf):
+    with sf() as s:
+        s.add_all([Job(kind="scan", status="queued"), Job(kind="run", status="running", started=5.0),
+                   Job(kind="old", status="done", message="ok")])
+        s.commit()
+    r = JobRunner(sf, now=Clock(2000.0))
+    r.start()
+    try:
+        assert not r.busy()
+        with sf() as s:
+            rows = {j.kind: j for j in s.query(Job)}
+        assert (rows["scan"].status, rows["scan"].message, rows["scan"].finished) == (
+            "error", "abgebrochen (Neustart)", 2000.0)
+        assert (rows["run"].status, rows["run"].message) == ("error", "abgebrochen (Neustart)")
+        assert (rows["old"].status, rows["old"].message) == ("done", "ok")
+        jid = r.submit("x", fast)
+        assert r.wait_idle(5) and job(sf, jid).status == "done"
+    finally:
+        r.stop()

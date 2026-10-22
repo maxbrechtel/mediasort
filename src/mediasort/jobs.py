@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from sqlalchemy import true, update
 from sqlalchemy.orm import Session
 
 from mediasort.db import Job
@@ -13,6 +14,8 @@ log = logging.getLogger(__name__)
 
 Progress = Callable[[int, int], None]
 JobFn = Callable[[int, Progress], str | None]
+
+ABORTED = "abgebrochen (Neustart)"
 
 
 class JobRunner:
@@ -35,9 +38,22 @@ class JobRunner:
         with self._cond:
             if self._thread is not None and self._thread.is_alive():
                 return
+            self._abort_stale()
             self._stopping = False
             self._thread = threading.Thread(target=self._loop, name="mediasort-jobs", daemon=True)
             self._thread.start()
+
+    def _abort_stale(self) -> None:
+        """Aufträge eines früheren Prozesses (wartend/laufend) gelten als abgebrochen."""
+        # ein vor ``start`` angenommener eigener Auftrag bleibt bestehen
+        not_own = Job.id != self._pending[0] if self._pending is not None else true()
+        with self._sf() as s:
+            s.execute(
+                update(Job)
+                .where(Job.status.in_(("queued", "running")), not_own)
+                .values(status="error", message=ABORTED, finished=self._now())
+            )
+            s.commit()
 
     def stop(self) -> None:
         with self._cond:

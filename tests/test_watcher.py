@@ -68,6 +68,8 @@ class Env:
         self.plan_effect = {}  # folder_id -> callable(folder) oder Exception
         self.busy = False
         self.submitted = []
+        self.ran_jobs: list[int | None] = []
+        self.ran_status: list[str] = []  # Status der Items beim Aufruf von run_items
 
     # Konfiguration
     def settings(self, **kw):
@@ -131,11 +133,23 @@ class Env:
             effect(folder, scan_id)
         return scan_id
 
-    def run_items(self, ids: list[int], auto: bool) -> None:
+    def run_items(self, ids: list[int], auto: bool, job_id: int | None) -> None:
         self.ran.append((list(ids), auto))
+        self.ran_jobs.append(job_id)
         with self.sm() as s:
             for i in ids:
-                s.get(Item, i).status = "done"
+                it = s.get(Item, i)
+                self.ran_status.append(it.status)
+                it.status = "done"
+            s.commit()
+
+    def status(self, item_id: int) -> str:
+        with self.sm() as s:
+            return s.get(Item, item_id).status
+
+    def set_level(self, folder_id: int, level: str):
+        with self.sm() as s:
+            s.get(Folder, folder_id).auto_level = level
             s.commit()
 
 
@@ -213,8 +227,10 @@ def test_tick_auto_executes_only_eligible_and_stable(env, w):
         env.state(p)
     env.state(grown, size=10)
 
-    result = w.tick()
+    result = w.tick(job_id=42)
     assert env.ran == [([a], True)]
+    assert env.ran_jobs == [42]
+    assert env.ran_status == ["confirmed"]  # der Executor führt nur bestätigte Vorschläge aus
     assert result == "1 Ordner geprüft, 0 neue Vorschläge, 1 automatisch einsortiert"
     # FileState wurde für alle offenen Items aktualisiert
     assert env.get_state(fresh).size == 10
@@ -277,16 +293,31 @@ def test_library_folders_never_automatic(env, w):
 
 
 def test_tick_skipped_when_busy(env, w):
+    env.settings(auto_enabled=True)
     env.busy = True
     assert w.trigger() == "übersprungen: Auftrag läuft"
     assert env.submitted == []
 
 
+def test_trigger_switched_off_submits_nothing(env, w):
+    assert w.trigger() == "Automatik ist ausgeschaltet"
+    assert env.submitted == []
+
+
 def test_trigger_submits_tick_as_auto_job(env, w):
+    env.settings(auto_enabled=True)
+    fid = env.folder("in", auto_level="auto")
+    p = env.file("in/a.mkv")
+    a = env.item(fid, p)
+    env.state(p)
     assert w.trigger() == "gestartet"
     (kind, fn, auto), = env.submitted
     assert (kind, auto) == ("auto", True)
-    assert fn(1, lambda done, total: None) == "Automatik ist ausgeschaltet"
+    reported = []
+    assert fn(7, lambda done, total: reported.append((done, total))) == (
+        "1 Ordner geprüft, 0 neue Vorschläge, 1 automatisch einsortiert")
+    assert env.ran == [([a], True)] and env.ran_jobs == [7]
+    assert reported[-1] == (1, 1)
 
 
 def test_trigger_with_real_runner_records_result(env, sessionmaker_):
@@ -299,7 +330,69 @@ def test_trigger_with_real_runner_records_result(env, sessionmaker_):
         assert runner.wait_idle(5)
         with sessionmaker_() as s:
             job = s.scalars(select(Job).where(Job.kind == "auto")).one()
-        assert (job.status, job.auto) == ("done", True)
+        assert (job.status, job.auto, job.progress, job.total) == ("done", True, 0, 0)
         assert job.message == "0 Ordner geprüft, 0 neue Vorschläge, 0 automatisch einsortiert"
     finally:
         runner.stop()
+
+
+def test_tick_rechecks_master_switch_before_executing(env, w):
+    env.settings(auto_enabled=True)
+    fid = env.folder("in", auto_level="auto")
+    p = env.file("in/a.mkv")
+    a = env.item(fid, p)
+    env.state(p)
+    env.plan_effect[fid] = lambda folder, scan_id: env.settings(auto_enabled=False)
+    assert w.tick() == "1 Ordner geprüft, 0 neue Vorschläge, 0 automatisch einsortiert"
+    assert env.ran == []
+    assert env.status(a) == "new"
+
+
+def test_tick_rechecks_folder_level_before_executing(env, w):
+    env.settings(auto_enabled=True)
+    fid = env.folder("in", auto_level="auto")
+    p = env.file("in/a.mkv")
+    a = env.item(fid, p)
+    env.state(p)
+    env.plan_effect[fid] = lambda folder, scan_id: env.set_level(fid, "detect")
+    assert w.tick().endswith("0 automatisch einsortiert")
+    assert env.ran == []
+    assert env.status(a) == "new"
+
+
+def test_tick_does_not_confirm_item_ignored_meanwhile(env, w, monkeypatch):
+    env.settings(auto_enabled=True)
+    fid = env.folder("in", auto_level="auto")
+    p, q = env.file("in/a.mkv"), env.file("in/b.mkv")
+    a, b = env.item(fid, p), env.item(fid, q)
+    env.state(p)
+    env.state(q)
+    observe = w._observe
+
+    def observe_then_user_ignores(folders, min_age_s):
+        ids = observe(folders, min_age_s)
+        assert ids == [a, b]
+        with env.sm() as s:
+            s.get(Item, b).status = "ignored"  # Nutzer ignoriert b, bevor bestätigt wird
+            s.commit()
+        return ids
+
+    monkeypatch.setattr(w, "_observe", observe_then_user_ignores)
+    assert w.tick().endswith("1 automatisch einsortiert")
+    assert env.ran == [([a], True)]
+    assert env.status(b) == "ignored"
+
+
+def test_tick_skips_item_whose_file_changed_since_suggestion(env, w):
+    env.settings(auto_enabled=True)
+    fid = env.folder("in", auto_level="auto")
+    p = env.file("in/a.mkv")
+    a = env.item(fid, p, size=5)  # Vorschlag stammt von einer kleineren Fassung
+    env.state(p)  # Datei ist seit der letzten Abfrage unverändert
+    b_path = env.file("in/b.mkv")
+    st = b_path.stat()
+    b = env.item(fid, b_path, mtime=st.st_mtime - 100)
+    env.state(b_path)
+    assert w.tick().endswith("0 automatisch einsortiert")
+    assert env.ran == []
+    assert env.status(a) == "new" and env.status(b) == "new"

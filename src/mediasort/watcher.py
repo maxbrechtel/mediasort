@@ -3,7 +3,7 @@
 import os
 from collections.abc import Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from mediasort.db import FileState, Folder, Item
@@ -42,7 +42,7 @@ class Watcher:
         session_factory: Callable[[], Session],
         runner: JobRunner,
         plan: Callable[[Folder, bool], int],
-        run_items: Callable[[list[int], bool], None],
+        run_items: Callable[[list[int], bool, int | None], None],
         now: Callable[[], float],
     ):
         self._sf = session_factory
@@ -52,13 +52,15 @@ class Watcher:
         self._now = now
 
     def trigger(self) -> str:
-        """Startet eine Abfrage als Hintergrundauftrag, außer es läuft schon einer."""
+        """Startet eine Abfrage als Hintergrundauftrag, außer die Automatik ist aus oder es läuft schon einer."""
+        if not self._auto_enabled():
+            return SWITCHED_OFF
         if self._runner.busy():
             return SKIPPED_BUSY
-        job_id = self._runner.submit("auto", lambda job_id, progress: self.tick(), auto=True)
+        job_id = self._runner.submit("auto", lambda job_id, progress: self.tick(job_id, progress), auto=True)
         return SKIPPED_BUSY if job_id is None else STARTED
 
-    def tick(self) -> str:
+    def tick(self, job_id: int | None = None, progress: Callable[[int, int], None] | None = None) -> str:
         """Eine Abfrage, synchron; gibt den Ergebnistext für die Übersicht zurück."""
         with self._sf() as s:
             settings = load_settings(s)
@@ -71,7 +73,9 @@ class Watcher:
             return SWITCHED_OFF
 
         checked, new, errors = 0, 0, []
-        for folder in folders:
+        for done, folder in enumerate(folders):
+            if progress is not None:
+                progress(done, len(folders))
             try:
                 scan_id = self._plan(folder, True)
             except Exception as exc:  # ein Ordner darf die übrigen nicht aufhalten
@@ -80,17 +84,24 @@ class Watcher:
             checked += 1
             with self._sf() as s:
                 new += s.scalar(select(func.count(Item.id)).where(Item.scan_id == scan_id)) or 0
+        if progress is not None:
+            progress(len(folders), len(folders))
 
-        ids = self._observe(folders, min_age_s=settings.min_age_minutes * 60)
+        candidates = self._observe(folders, min_age_s=settings.min_age_minutes * 60)
+        ids = self._confirm(candidates) if candidates else []
         if ids:
-            self._run_items(ids, True)
+            self._run_items(ids, True, job_id)
 
         noun = "neuer Vorschlag" if new == 1 else "neue Vorschläge"
         parts = [f"{checked} Ordner geprüft, {new} {noun}, {len(ids)} automatisch einsortiert"]
         return "; ".join(parts + errors)
 
+    def _auto_enabled(self) -> bool:
+        with self._sf() as s:
+            return load_settings(s).auto_enabled
+
     def _observe(self, folders: list[Folder], min_age_s: float) -> list[int]:
-        """Schreibt ``FileState`` fort und liefert die IDs, die automatisch einsortiert werden."""
+        """Schreibt ``FileState`` fort und liefert die Kandidaten für automatisches Einsortieren."""
         auto_ids = {f.id for f in folders if f.auto_level == AutoLevel.AUTO.value}
         now = self._now()
         eligible: list[int] = []
@@ -128,3 +139,28 @@ class Watcher:
                 s.merge(FileState(path=source, size=size, mtime=mtime, last_seen=now))
             s.commit()
         return eligible
+
+    def _confirm(self, ids: list[int]) -> list[int]:
+        """Bestätigt die Kandidaten in einer Transaktion direkt vor dem Ausführen.
+
+        Hauptschalter und Ordnerstufe werden dabei neu gelesen (die Planung kann Minuten dauern);
+        bestätigt werden nur Vorschläge, die noch ``new`` sind und in einem Ordner auf „auto“ liegen.
+        """
+        with self._sf() as s:
+            if not load_settings(s).auto_enabled:
+                return []
+            auto_folders = select(Folder.id).where(
+                Folder.role == "input", Folder.auto_level == AutoLevel.AUTO.value
+            )
+            confirmed = s.scalars(
+                update(Item)
+                .where(
+                    Item.id.in_(ids),
+                    Item.status == ItemStatus.NEW.value,
+                    Item.folder_id.in_(auto_folders),
+                )
+                .values(status=ItemStatus.CONFIRMED.value)
+                .returning(Item.id)
+            ).all()
+            s.commit()
+        return sorted(confirmed)
