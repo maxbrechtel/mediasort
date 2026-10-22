@@ -734,6 +734,30 @@ def test_editing_overlapping_folder_is_rejected(client):
         assert s.get(Folder, inner_id).media_type == "auto"
 
 
+def test_overlapping_folder_can_still_change_automation(client):
+    # Abschlussprüfung R5: ein Altbestand mit ineinander liegenden Ordnern muss sich abschalten lassen
+    with client.app.state.sf() as s:
+        inner = Folder(path=str(client.env.media / "Downloads" / "Teil"), role="input", media_type="auto",
+                       auto_level="auto")
+        s.add(inner)
+        s.commit()
+        inner_id = inner.id
+    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "auto_level": "off"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    with client.app.state.sf() as s:
+        assert s.get(Folder, inner_id).auto_level == "off"
+    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "auto_level": "detect"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    # zusammen mit einer anderen Änderung gilt weiter die Prüfung auf Überschneidung
+    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "auto_level": "off", "media_type": "movie"})
+    assert r.status_code == 400 and "überschneidet sich" in r.text
+    with client.app.state.sf() as s:
+        folder = s.get(Folder, inner_id)
+        assert (folder.auto_level, folder.media_type) == ("detect", "auto")
+
+
 def test_scan_accepts_only_input_folders(client, media_tree):
     r = client.post(f"/scan/{client.env.filme_id}", follow_redirects=False)
     assert r.status_code == 400 and "Bibliothek prüfen" in r.text
