@@ -153,19 +153,28 @@ def parse_folder_options(form: FormData, role: str, library_ids: Collection[int]
     return options
 
 
+def clean_path(path: str) -> str:
+    """Absoluter Pfad mit genau einem Schrägstrich am Anfang und zwischen den Teilen.
+
+    ``posixpath.normpath`` lässt zwei führende Schrägstriche stehen („//media“), die dann nicht
+    als derselbe Ordner wie „/media“ erkannt würden (Abschlussprüfung R2).
+    """
+    return posixpath.normpath("/" + path.lstrip("/")) if path.startswith("/") else posixpath.normpath(path)
+
+
 def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
     """Felder für eine neue ``Folder``-Zeile."""
     raw_path = str(form.get("path", "")).strip()
     if not raw_path.startswith("/"):
         raise FormError("Bitte einen absoluten Pfad angeben (beginnt mit /)")
     role = _choice(form, "role", ROLES, "Rolle", "input")
-    return {"path": posixpath.normpath(raw_path), "role": role,
+    return {"path": clean_path(raw_path), "role": role,
             **parse_folder_options(form, role, library_ids)}
 
 
 def _folder_key(path: str) -> PurePosixPath:
     """Vergleichsform eines Ordnerpfads: normalisiert und ohne Groß-/Kleinschreibung (SMB)."""
-    return PurePosixPath(casefold(posixpath.normpath(path)))
+    return PurePosixPath(casefold(clean_path(path)))
 
 
 def overlap_error(path: str, others: Iterable[str]) -> str | None:

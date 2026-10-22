@@ -682,6 +682,40 @@ def test_overlapping_folder_is_rejected(client, rel):
         assert s.scalar(select(func.count(Folder.id))) == 4
 
 
+@pytest.mark.parametrize("prefix", ["/", "//"])
+def test_overlapping_folder_with_extra_slashes_is_rejected(client, prefix):
+    # Abschlussprüfung R2: „//media“ ist für normpath nicht dasselbe wie „/media“
+    for path in (prefix + str(client.env.media), prefix + str(client.env.media / "Filme_2D") + "//X"):
+        r = client.post("/settings/folders", data={**FOLDER_FORM, "path": path})
+        assert r.status_code == 400 and "überschneidet sich" in r.text
+    with client.app.state.sf() as s:
+        assert s.scalar(select(func.count(Folder.id))) == 4
+
+
+@pytest.mark.parametrize("path", ["//media", "///media", "/media//Downloads/X", "//media//Downloads//"])
+def test_overlap_error_collapses_repeated_slashes(path):
+    from mediasort.web.forms import overlap_error
+
+    assert overlap_error(path, ["/media/Downloads"]) is not None
+    assert overlap_error("/media/Downloads", [path]) is not None
+
+
+def test_overlap_error_sibling_with_extra_slashes_is_no_overlap():
+    from mediasort.web.forms import clean_path, overlap_error
+
+    assert clean_path("//media/Filme_2D") == "/media/Filme_2D"
+    assert overlap_error("//media/Filme_2D", ["/media/Downloads"]) is None
+    assert overlap_error("//media/Filme_2D", ["/media/Filme_2D"]) is not None
+
+
+def test_new_folder_path_is_stored_with_single_slashes(client):
+    r = client.post("/settings/folders", data={**FOLDER_FORM, "path": "/" + str(client.env.media / "Neu") + "//"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    with client.app.state.sf() as s:
+        assert s.scalar(select(Folder.path).order_by(Folder.id.desc())) == str(client.env.media / "Neu")
+
+
 def test_sibling_folder_is_accepted(client):
     r = client.post("/settings/folders", data={**FOLDER_FORM, "path": str(client.env.media / "Downloads2")},
                     follow_redirects=False)
