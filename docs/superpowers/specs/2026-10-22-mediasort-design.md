@@ -6,8 +6,9 @@ Stand: 2026-10-22
 
 mediasort erkennt Film- und Seriendateien, gleicht sie mit TMDB ab und legt sie
 nach einem festen Schema in einer Plex-Bibliothek ab. Bedient wird es über eine
-Weboberfläche im Heimnetz. Jede Änderung wird vorher in einer Prüfliste angezeigt
-und erst nach Bestätigung ausgeführt.
+Weboberfläche im Heimnetz. Standardmäßig wird jede Änderung vorher in einer
+Prüfliste angezeigt und erst nach Bestätigung ausgeführt. Später kann eine
+automatische Ordnerüberwachung sichere Treffer selbstständig einsortieren.
 
 Erfolgskriterien:
 
