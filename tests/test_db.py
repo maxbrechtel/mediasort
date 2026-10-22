@@ -62,11 +62,25 @@ def test_cache_put_overwrites_and_refreshes(sessionmaker_):
     assert c.get("k") == [2]
 
 
-def test_wal_mode_and_threads(tmp_path):
+def test_wal_mode_and_cross_thread_session(tmp_path):
+    import threading
+
+    from mediasort.db import init_db
+
     engine = make_engine(tmp_path / "sub" / "m.db")
     try:
         with engine.connect() as conn:
             assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        sm = init_db(engine)
+        session = sm()
+        session.add(Job(kind="scan", status="queued"))
+        session.commit()
+        seen = []
+        t = threading.Thread(target=lambda: seen.append(session.query(Job).count()))
+        t.start()
+        t.join()
+        session.close()
+        assert seen == [1]
     finally:
         engine.dispose()
 
