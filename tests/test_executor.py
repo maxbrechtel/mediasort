@@ -860,3 +860,55 @@ def test_keep_existing_allowed_for_partial_conflict(env):
                     decision="keep_existing", meta=True, partial=True)
     assert run(env, item).done == 1
     assert env.p(old).exists() and not env.p("Downloads/Rel/m.mkv").exists()
+
+
+# --- Abschlussprüfung I5: SMB ohne Groß-/Kleinschreibung -------------------------------------
+
+LOWER_2D = "Filme_2D/M (2020)/m (2020) 1080p h264 ac3 [de].mkv"
+
+
+def _case_insensitive(monkeypatch):
+    real_exists, real_same = executor._exists, executor._same_file
+
+    def ci_exists(path):
+        path = Path(path)
+        try:
+            return real_exists(path) or any(c.name.casefold() == path.name.casefold() for c in path.parent.iterdir())
+        except OSError:
+            return False
+
+    monkeypatch.setattr(executor, "_exists", ci_exists)
+    monkeypatch.setattr(executor, "_same_file", lambda a, b: str(a).casefold() == str(b).casefold() or real_same(a, b))
+
+
+def test_case_only_rename_goes_through_temporary_name(env, monkeypatch):
+    _case_insensitive(monkeypatch)
+    renames = []
+    real_rename = os.rename
+    monkeypatch.setattr(executor.os, "rename", lambda a, b: (renames.append((Path(a).name, Path(b).name)),
+                                                             real_rename(a, b))[1])
+    item = env.item(LOWER_2D, TARGET_2D)
+    r = run(env, item)
+    assert (r.done, r.failed) == (1, 0)
+    assert [p.name for p in env.p("Filme_2D/M (2020)").iterdir()] == [Path(TARGET_2D).name]
+    assert renames == [(Path(LOWER_2D).name, Path(LOWER_2D).name + ".mediasort-tmp"),
+                       (Path(LOWER_2D).name + ".mediasort-tmp", Path(TARGET_2D).name)]
+    assert [(h.action, h.old_path, h.new_path) for h in env.history()] == [
+        ("moved", str(env.p(LOWER_2D)), str(env.p(TARGET_2D)))]
+
+
+def test_case_rename_never_replaces_distinct_file(env):
+    # auf einem Dateisystem mit Groß-/Kleinschreibung sind es zwei verschiedene Dateien
+    write(env.p(TARGET_2D), b"fremd")
+    item = env.item(LOWER_2D, TARGET_2D)
+    r = run(env, item)
+    assert r.failed == 1 and env.get(item.id).error.startswith("Ziel belegt")
+    assert env.p(TARGET_2D).read_bytes() == b"fremd" and env.p(LOWER_2D).read_bytes() == b"video"
+    assert not list(env.p("Filme_2D/M (2020)").glob("*.mediasort-tmp"))
+
+
+def test_keep_existing_refused_when_existing_is_the_source(env, monkeypatch):
+    _case_insensitive(monkeypatch)
+    item = env.item(LOWER_2D, TARGET_2D, existing=[TARGET_2D], decision="keep_existing")
+    r = run(env, item)
+    assert r.failed == 1 and env.p(LOWER_2D).read_bytes() == b"video"

@@ -285,6 +285,11 @@ def _resolve_existing(s: Session, item: Item, source: Path, moved_now: dict[str,
     return found
 
 
+def _case_variant(src: Path, dst: Path) -> bool:
+    """``dst`` ist (auf SMB) dieselbe Datei wie ``src``, nur anders geschrieben."""
+    return src != dst and _exists(dst) and (_same_name(src, dst) or _same_file(src, dst))
+
+
 def _unchanged(entry: _Existing, conflict: dict) -> bool:
     """Liegt die vorhandene Version noch so vor wie beim Scan (Größe, Änderungszeit)?
 
@@ -351,6 +356,9 @@ class _ItemRun:
         return {old: new for _, action, old, new in self.log if action == "moved"}
 
     def move(self, src: Path, dst: Path) -> None:
+        if _case_variant(src, dst):
+            self.rename_case(src, dst)
+            return
         try:
             move_file(src, dst)
         except SourceNotRemoved as exc:
@@ -359,6 +367,28 @@ class _ItemRun:
                 f"Nach {dst} kopiert, aber die Quelle konnte nicht gelöscht werden – "
                 f"die Datei liegt jetzt doppelt vor: {src} ({exc.strerror})"
             ) from exc
+        self.record("moved", src, dst)
+
+    def rename_case(self, src: Path, dst: Path) -> None:
+        """Nur die Schreibweise ändert sich (SMB): über einen Zwischennamen im selben Ordner umbenennen.
+
+        Liegt danach trotzdem eine Datei unter ``dst`` (Dateisystem unterscheidet die Schreibweise,
+        es ist also eine andere Datei), wird zurückbenannt: es wird nie überschrieben.
+        """
+        tmp = src.with_name(src.name + TMP_SUFFIX)
+        if _exists(tmp):
+            raise _Failed(f"Zwischenname belegt: {tmp}")
+        os.rename(src, tmp)
+        try:
+            if _exists(dst):
+                raise FileExistsError(errno.EEXIST, "Ziel existiert bereits", str(dst))
+            os.rename(tmp, dst)
+        except BaseException as exc:
+            try:
+                os.rename(tmp, src)
+            except OSError:
+                raise _Failed(f"{_message(exc)}; die Datei liegt noch unter: {tmp}") from exc
+            raise
         self.record("moved", src, dst)
 
     def delete(self, path: Path) -> None:
@@ -446,11 +476,11 @@ class _ItemRun:
         root = _library_root(target, self.ctx.libraries)
         replaced = target if decision == "keep_new" and target in existing else None
         replaced_subs = _subtitles_of(target) if replaced else []
-        if _exists(target) and replaced is None:
+        if _exists(target) and replaced is None and not _case_variant(source, target):
             raise _Failed(TARGET_TAKEN if decision == "keep_both" else f"Ziel existiert bereits: {target}")
         sub_moves = [(Path(d["path"]), Path(d["target"])) for d in source_subs if d.get("target")]
-        for _, sub_target in sub_moves:
-            if _exists(sub_target) and sub_target not in replaced_subs:
+        for sub_source, sub_target in sub_moves:
+            if _exists(sub_target) and sub_target not in replaced_subs and not _case_variant(sub_source, sub_target):
                 raise _Failed(f"Untertitelziel belegt: {sub_target}")
         for aside in map(_parked, [replaced, *replaced_subs] if replaced else []):
             if _exists(aside):

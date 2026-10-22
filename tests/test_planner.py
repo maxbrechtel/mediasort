@@ -759,3 +759,24 @@ def test_unreadable_library_fails_scan_and_keeps_index(env, monkeypatch):
         scans = s.scalars(select(Scan).order_by(Scan.id)).all()
         entry = s.scalars(select(LibraryEntry).where(LibraryEntry.path == env.p("Filme_2D/Matrix (1999)"))).one()
     assert scans[-1].status == "error" and entry.tmdb_id == 603
+
+
+# --- Abschlussprüfung I5: SMB ohne Groß-/Kleinschreibung -------------------------------------
+
+
+def test_case_only_rename_in_library_is_no_conflict(env, monkeypatch):
+    real_exists = Path.exists
+
+    def ci_exists(self, *args, **kwargs):  # wie auf einer SMB-Freigabe: Schreibweise egal
+        if real_exists(self, *args, **kwargs):
+            return True
+        try:
+            return any(c.name.casefold() == self.name.casefold() for c in self.parent.iterdir())
+        except OSError:
+            return False
+
+    monkeypatch.setattr(Path, "exists", ci_exists)
+    src = env.file("Filme_2D/Matrix (1999)/matrix (1999) 1080p h264 dts [de+en].mkv")
+    [it] = env.plan("Filme_2D").items()
+    assert it.source == str(src) and it.conflict_json is None
+    assert it.target == env.p("Filme_2D/Matrix (1999)/Matrix (1999) 1080p h264 DTS [DE+EN].mkv")
