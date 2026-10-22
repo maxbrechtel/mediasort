@@ -1,0 +1,23 @@
+{% set conflict = row.conflict %}
+<div class="conflict">
+  <strong>Konflikt: dieser Titel liegt schon in der Bibliothek</strong>
+  <div class="versions">
+    <div class="version">
+      <span class="muted">Neue Version</span>
+      <code>{{ it.source }}</code>
+      {% if row.tech %}<small>{{ row.tech | join(" · ") }}</small>{% endif %}
+    </div>
+    <div class="version">
+      <span class="muted">Vorhanden</span>
+      {% for path in conflict.existing %}<code>{{ path }}</code>{% endfor %}
+    </div>
+  </div>
+  <p>{{ conflict.hint }}{% if conflict.decided %} <strong>Entschieden: {{ conflict.decided }}</strong>{% endif %}</p>
+  <form class="decision" method="post" action="/items/{{ it.id }}/decision"
+        hx-post="/items/{{ it.id }}/decision" hx-target="#item-{{ it.id }}" hx-swap="outerHTML">
+    {% for value, label in conflict.options %}
+    <label class="check"><input type="radio" name="decision" value="{{ value }}"{% if value == conflict.selected %} checked{% endif %} required> {{ label }}</label>
+    {% endfor %}
+    <button type="submit">Entscheiden</button>
+  </form>
+</div>

@@ -134,7 +134,43 @@ progress { width: 60%; vertical-align: middle; }
 .actions { padding-left: 1.2rem; margin: 0; }
 .scan-errors td { color: var(--error); }
 
+.nowrap { white-space: nowrap; }
+h4 { font-size: 0.95rem; margin: 1rem 0 0.25rem; color: var(--muted); }
+
+/* Prüfliste */
+.filters, .bulk { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; margin: 0 0 1rem; }
+.filters label { min-width: 10rem; }
+.bulk form { margin: 0; }
+table.items tbody.item tr.item-main td { border-bottom: none; }
+table.items tbody.item-confirmed { background: color-mix(in srgb, var(--ok) 8%, transparent); }
+table.items tbody.item-error { background: color-mix(in srgb, var(--error) 6%, transparent); }
+tr.item-detail td { padding-top: 0; }
+tr.item-detail p { margin: 0.25rem 0; }
+.item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+button.check { background: transparent; color: var(--accent); white-space: nowrap; }
+button.check.on { background: var(--ok); border-color: var(--ok); color: var(--accent-fg); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.conflict {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.25rem 0;
+}
+.versions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; margin: 0.5rem 0; }
+.version { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.decision { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; }
+form.correct { display: flex; flex-direction: column; gap: 0.75rem; margin: 0.5rem 0; }
+form.correct fieldset { border: 1px solid var(--border); border-radius: 6px; }
+form.correct > button { align-self: flex-start; }
+.correct-search, .correct-numbers { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
+.correct-search label:first-child { flex: 1 1 14rem; }
+.correct-numbers label { flex: 1 1 8rem; }
+.candidates { list-style: none; padding: 0; margin: 0.5rem 0 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.candidates li { display: flex; align-items: center; gap: 0.5rem; }
+
 @media (max-width: 700px) {
+  .versions { grid-template-columns: 1fr; }
   .grid, .folder-form { grid-template-columns: 1fr; }
   table.stack thead { display: none; }
   table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }

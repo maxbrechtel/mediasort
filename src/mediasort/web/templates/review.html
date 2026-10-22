@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Prüfliste{% endblock %}
+{% macro item_table(rows) %}
+<table class="stack items">
+  <thead><tr><th>Bestätigt</th><th>Datei → Ziel</th><th>Sicherheit</th><th>Technik</th><th></th></tr></thead>
+  {% for row in rows %}{% include "_item_row.html" %}{% endfor %}
+</table>
+{% endmacro %}
+{% block content %}
+<h1>Prüfliste</h1>
+
+{% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+
+<form class="filters" method="get" action="/review">
+  <label>Sicherheit
+    <select name="confidence">
+      <option value="">alle</option>
+      {% for value in confidences %}
+      <option value="{{ value }}"{% if filters.confidence == value %} selected{% endif %}>{{ value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Typ
+    <select name="kind">
+      <option value="">alle</option>
+      {% for value, label in kind_filters.items() %}
+      <option value="{{ value }}"{% if filters.kind == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Anzeigen
+    <select name="only">
+      <option value="">alle Vorschläge</option>
+      {% for value, label in only_filters.items() %}
+      <option value="{{ value }}"{% if filters.only == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="secondary">Filtern</button>
+</form>
+
+<div class="bulk">
+  <form method="post" action="/items/confirm-safe">
+    <button type="submit" class="secondary">Alle sicheren übernehmen</button>
+  </form>
+  <form method="post" action="/execute" hx-post="/execute" hx-target="#current-job" hx-swap="outerHTML">
+    <button type="submit">Ausgewählte ausführen</button>
+  </form>
+</div>
+
+{% include "_job.html" %}
+
+{% if not series and not movies %}
+<p class="muted">Keine Vorschläge{% if filters.active %} für diese Auswahl{% endif %}.</p>
+{% endif %}
+
+{% if series %}
+<section>
+  <h2>Serien</h2>
+  {% for show in series %}
+  <div class="card">
+    <h3>{{ show.title }}</h3>
+    {% for season in show.seasons %}
+    <h4>{{ season.label }}</h4>
+    {{ item_table(season.rows) }}
+    {% endfor %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if movies %}
+<section>
+  <h2>Filme</h2>
+  <div class="card">{{ item_table(movies) }}</div>
+</section>
+{% endif %}
+{% endblock %}

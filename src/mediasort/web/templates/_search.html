@@ -1,0 +1,17 @@
+{% if search_error %}
+<p class="error">{{ search_error }}</p>
+{% elif not results %}
+<p class="muted">Keine Treffer.</p>
+{% else %}
+<ul class="candidates">
+  {% for cand in results %}
+  <li>
+    <button type="submit" class="secondary" name="pick"
+            value="tmdb:{{ 'movie' if cand.kind == 'movie' else 'tv' }}:{{ cand.tmdb_id }}">Übernehmen</button>
+    <span>{{ cand.title }}{% if cand.year %} ({{ cand.year }}){% endif %}
+      <small class="muted">{{ "Film" if cand.kind == "movie" else "Serie" }}{% if cand.original_title and cand.original_title != cand.title %} · {{ cand.original_title }}{% endif %} · TMDB {{ cand.tmdb_id }}</small>
+    </span>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

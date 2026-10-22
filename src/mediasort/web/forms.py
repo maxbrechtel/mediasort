@@ -1,4 +1,4 @@
-"""Formulare der Einstellungsseite: Werte darstellen und Eingaben prüfen (Meldungen auf Deutsch)."""
+"""Formulare der Einstellungsseite und der Korrektur: Werte darstellen und Eingaben prüfen (Meldungen auf Deutsch)."""
 
 from collections.abc import Collection, Mapping
 from dataclasses import replace
@@ -8,6 +8,7 @@ from starlette.datastructures import FormData
 
 from mediasort.models import AutoLevel, FolderType
 from mediasort.settings import Settings
+from mediasort.tmdb import TmdbClient
 
 MB = 1_048_576
 MAP_SEPARATOR = "=>"
@@ -23,6 +24,10 @@ _NUMBERS = {
 _TEXTS = ("tmdb_key", "language", "season_label", "plex_url", "plex_token")
 _CHECKBOXES = ("auto_enabled", "confirmed_trash_warning")
 _REQUIRED = {"language": "Sprache", "season_label": "Staffelbezeichnung"}
+FORMATS_3D = ("SBS", "HSBS", "OU", "HOU", "TAB", "MVC")
+CORRECTION_FIELDS = ("reference", "season", "episodes", "format_3d")
+BAD_REFERENCE = ("Bitte eine TMDB-/IMDb-ID oder einen Link angeben (z. B. tmdb:movie:603, "
+                 "https://www.themoviedb.org/tv/1396 oder tt0133093)")
 
 
 class FormError(ValueError):
@@ -147,3 +152,39 @@ def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
     role = _choice(form, "role", ROLES, "Rolle", "input")
     return {"path": str(PurePosixPath(raw_path)), "role": role,
             **parse_folder_options(form, role, library_ids)}
+
+
+def _int_at_least(raw: str, label: str, minimum: int) -> int:
+    try:
+        number = int(raw)
+    except ValueError:
+        number = None
+    if number is None or number < minimum:
+        raise FormError(f"„{label}“ muss eine ganze Zahl ab {minimum} sein")
+    return number
+
+
+def parse_correction_form(form: FormData) -> dict:
+    """Korrekturangaben für ``replan_item``; leere Felder bleiben unverändert (``None``).
+
+    Ein Suchtreffer kommt als ``pick`` (``tmdb:movie:603``) und hat Vorrang vor dem Freitextfeld.
+    """
+    raw_ref = str(form.get("pick", "")).strip() or str(form.get("reference", "")).strip()
+    tmdb_ref = None
+    if raw_ref:
+        tmdb_ref = TmdbClient.parse_reference(raw_ref)
+        if tmdb_ref is None:
+            raise FormError(BAD_REFERENCE)
+    raw_season = str(form.get("season", "")).strip()
+    season = _int_at_least(raw_season, "Staffel", 0) if raw_season else None
+    episodes = None
+    raw_episodes = str(form.get("episodes", "")).strip()
+    if raw_episodes:
+        parts = [p.strip() for p in raw_episodes.split(",") if p.strip()]
+        if not parts or not all(p.isascii() and p.isdigit() and int(p) >= 1 for p in parts):
+            raise FormError("„Folgen“ bitte als Nummern mit Komma angeben (z. B. 1, 2)")
+        episodes = sorted({int(p) for p in parts})
+    format_3d = str(form.get("format_3d", "")).strip() or None
+    if format_3d is not None and format_3d not in FORMATS_3D:
+        raise FormError(f"Ungültiges 3D-Format: {format_3d}")
+    return {"tmdb_ref": tmdb_ref, "season": season, "episodes": episodes, "format_3d": format_3d}

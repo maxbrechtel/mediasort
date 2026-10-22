@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Korrigieren{% endblock %}
+{% block content %}
+<h1>Vorschlag korrigieren</h1>
+<section class="card">
+  <p><code>{{ row.old_name }}</code> →
+    {% if row.new_path %}<code>{{ row.new_path }}</code>{% else %}<span class="muted">kein Ziel</span>{% endif %}
+    <span class="nowrap">{{ row.badge }}</span></p>
+  {% if row.item.error %}<p class="error">{{ row.item.error }}</p>{% endif %}
+  <div id="correct-{{ row.item.id }}">{% include "_correct.html" %}</div>
+</section>
+<p><a href="/review">Zurück zur Prüfliste</a></p>
+{% endblock %}

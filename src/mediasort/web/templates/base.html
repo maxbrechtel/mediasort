@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}mediasort{% endblock %} – mediasort</title>
+  <!-- Fehlerantworten 400/409/502 enthalten deutsche Meldungen und werden wie Erfolge eingesetzt -->
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"^(400|409|502)$","swap":true,"error":true},{"code":"[45]..","swap":false,"error":true}]}'>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
 </head>

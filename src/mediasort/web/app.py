@@ -4,8 +4,8 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Iterable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import httpx
@@ -19,13 +19,13 @@ from mediasort import mediainfo, plex
 from mediasort.db import DbCache, Folder, Item, Scan, init_db, make_engine
 from mediasort.executor import execute
 from mediasort.jobs import JobRunner
-from mediasort.models import MediaInfo
-from mediasort.planner import PlanContext, plan_folder
+from mediasort.models import Candidate, MediaInfo, MediaKind
+from mediasort.planner import PlanContext, plan_folder, replan_item
 from mediasort.plex import PlexClient, refresh_touched
 from mediasort.settings import Settings, load_settings
 from mediasort.tmdb import TmdbClient
 from mediasort.watcher import Watcher
-from mediasort.web import routes_admin, routes_main
+from mediasort.web import routes_admin, routes_main, routes_review
 
 log = logging.getLogger(__name__)
 
@@ -75,16 +75,44 @@ class Services:
         with self.sf() as s:
             return [Path(p) for p in s.scalars(select(Folder.path).where(Folder.role == "library"))]
 
-    def plan(self, folder: Folder, auto: bool) -> int:
-        """Scannt ``folder`` mit den aktuellen Einstellungen; Rückgabe ist die Scan-ID."""
+    @contextmanager
+    def _tmdb(self) -> Iterator[tuple[Settings, TmdbClient]]:
         settings = self.settings()
         tmdb = self.tmdb_client(settings)
         try:
-            ctx = PlanContext(session_factory=self.sf, settings=settings, tmdb=tmdb,
-                              probe=self._probe, now=self._now)
-            return plan_folder(ctx, folder, auto=auto)
+            yield settings, tmdb
         finally:
             tmdb.close()
+
+    @contextmanager
+    def _plan_context(self) -> Iterator[PlanContext]:
+        with self._tmdb() as (settings, tmdb):
+            yield PlanContext(session_factory=self.sf, settings=settings, tmdb=tmdb,
+                              probe=self._probe, now=self._now)
+
+    def plan(self, folder: Folder, auto: bool) -> int:
+        """Scannt ``folder`` mit den aktuellen Einstellungen; Rückgabe ist die Scan-ID."""
+        with self._plan_context() as ctx:
+            return plan_folder(ctx, folder, auto=auto)
+
+    def replan(
+        self,
+        item_id: int,
+        *,
+        tmdb_ref: tuple[str, str] | None = None,
+        season: int | None = None,
+        episodes: Sequence[int] | None = None,
+        format_3d: str | None = None,
+    ) -> None:
+        """Plant einen Vorschlag neu, wahlweise mit Korrekturen (siehe ``replan_item``)."""
+        with self._plan_context() as ctx:
+            replan_item(ctx, item_id, tmdb_ref=tmdb_ref, season=season, episodes=episodes,
+                        format_3d=format_3d)
+
+    def search(self, kind: MediaKind, query: str, year: int | None) -> list[Candidate]:
+        """TMDB-Suche für die Korrektur."""
+        with self._tmdb() as (_settings, tmdb):
+            return tmdb.search(kind, query, year)
 
     def scan_folder(self, folder_id: int) -> str:
         """Manueller Scan als Auftrag; Ergebnistext für die Übersicht."""
@@ -101,10 +129,17 @@ class Services:
             message += f"; {len(errors)} Pfade nicht lesbar"
         return message
 
-    def run_items(self, ids: list[int], auto: bool, job_id: int | None) -> list[str]:
+    def run_items(
+        self,
+        ids: list[int],
+        auto: bool,
+        job_id: int | None,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[str]:
         """Führt bestätigte Vorschläge im laufenden Auftrag aus, stößt danach Plex an; liefert Plex-Hinweise."""
         settings = self.settings()
-        report = execute(self.sf, ids, settings=settings, job_id=job_id, auto=auto)
+        report = execute(self.sf, ids, settings=settings, job_id=job_id, auto=auto,
+                         progress=progress or (lambda done, total: None))
         hints = self.refresh_plex(settings, report.touched)
         for hint in hints:
             log.warning("Plex-Teilscan nach Auftrag %s: %s", job_id, hint)
@@ -203,6 +238,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(routes_main.router)
     app.include_router(routes_admin.router)
+    app.include_router(routes_review.router)
     return app
 
 

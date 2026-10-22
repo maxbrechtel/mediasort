@@ -1,0 +1,46 @@
+{% set it = row.item %}
+<form class="correct" method="post" action="/items/{{ it.id }}/correct"
+      {% if not page %}hx-post="/items/{{ it.id }}/correct" hx-target="#correct-{{ it.id }}" hx-swap="innerHTML"{% endif %}>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <fieldset>
+    <legend>TMDB-Suche</legend>
+    <div class="correct-search">
+      <label>Suchbegriff
+        <input type="text" name="q" id="q-{{ it.id }}" value="{{ values.q }}">
+      </label>
+      <label>Art
+        <select name="kind" id="kind-{{ it.id }}">
+          <option value="movie"{% if values.kind == "movie" %} selected{% endif %}>Film</option>
+          <option value="tv"{% if values.kind == "tv" %} selected{% endif %}>Serie</option>
+        </select>
+      </label>
+      <button type="submit" class="secondary" formaction="/items/{{ it.id }}/search" formmethod="get"
+              {% if not page %}hx-get="/items/{{ it.id }}/search" hx-include="#q-{{ it.id }}, #kind-{{ it.id }}"
+              hx-target="#search-{{ it.id }}" hx-swap="innerHTML"{% endif %}>Suchen</button>
+    </div>
+    <div id="search-{{ it.id }}">{% if results is not none or search_error %}{% include "_search.html" %}{% endif %}</div>
+  </fieldset>
+  <label>TMDB-/IMDb-ID oder Link
+    <input type="text" name="reference" value="{{ values.reference }}"
+           placeholder="tmdb:movie:603, https://www.themoviedb.org/tv/1396 oder tt0133093">
+  </label>
+  <div class="correct-numbers">
+    <label>Staffel
+      <input type="number" name="season" min="0" value="{{ values.season }}">
+    </label>
+    <label>Folgen
+      <input type="text" name="episodes" value="{{ values.episodes }}" placeholder="z. B. 1, 2">
+    </label>
+    <label>3D-Format
+      <select name="format_3d">
+        <option value="">—</option>
+        {% for fmt in formats_3d %}
+        <option value="{{ fmt }}"{% if values.format_3d == fmt %} selected{% endif %}>{{ fmt }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <p class="muted">Staffel und Folgen gelten nur für Serien. Leere Felder bleiben unverändert.</p>
+  <button type="submit">Übernehmen</button>
+  {% if page %}<a href="/review#item-{{ it.id }}">Abbrechen</a>{% endif %}
+</form>

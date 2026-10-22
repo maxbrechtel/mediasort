@@ -1,0 +1,60 @@
+{% set it = row.item %}
+{% set target = "#item-%d" % it.id %}
+<tbody id="item-{{ it.id }}" class="item item-{{ it.status }}">
+{% if it.status not in ("new", "confirmed", "error") %}
+  <tr>
+    <td colspan="5" class="muted">
+      <code>{{ row.old_name }}</code>: nicht mehr in der Prüfliste{% if it.note %} ({{ it.note }}){% endif %}.
+      {% if row.message %}<span class="error">{{ row.message }}</span>{% endif %}
+    </td>
+  </tr>
+{% else %}
+  <tr class="item-main">
+    <td data-label="Bestätigt">
+      <form method="post" action="/items/{{ it.id }}/toggle"
+            hx-post="/items/{{ it.id }}/toggle" hx-target="{{ target }}" hx-swap="outerHTML">
+        {% if it.status == "confirmed" %}
+        <button type="submit" class="check on" title="Bestätigung zurücknehmen">☑ bestätigt</button>
+        {% else %}
+        <button type="submit" class="check"{% if row.blocked %} disabled{% endif %}>☐ bestätigen</button>
+        {% endif %}
+      </form>
+      {% if row.blocked and it.status != "confirmed" %}<small class="muted">{{ row.blocked }}</small>{% endif %}
+    </td>
+    <td data-label="Datei">
+      <code title="{{ it.source }}">{{ row.old_name }}</code> →
+      {% if row.new_path %}<code>{{ row.new_path }}</code>{% else %}<span class="muted">kein Ziel</span>{% endif %}
+    </td>
+    <td data-label="Sicherheit" class="nowrap">{{ row.badge }}</td>
+    <td data-label="Technik">
+      {{ row.tech | join(" · ") if row.tech else "–" }}
+      {% if row.subtitles %}<br><small class="muted">{{ row.subtitles }}</small>{% endif %}
+    </td>
+    <td>
+      <div class="item-actions">
+      <a href="/items/{{ it.id }}/correct" hx-get="/items/{{ it.id }}/correct"
+         hx-target="#correct-{{ it.id }}" hx-swap="innerHTML">Korrigieren</a>
+      {% if it.status in ("new", "error") %}
+      <form method="post" action="/items/{{ it.id }}/replan"
+            hx-post="/items/{{ it.id }}/replan" hx-target="{{ target }}" hx-swap="outerHTML">
+        <button type="submit" class="secondary">Neu planen</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/items/{{ it.id }}/ignore"
+            hx-post="/items/{{ it.id }}/ignore" hx-target="{{ target }}" hx-swap="outerHTML">
+        <button type="submit" class="danger">Ignorieren</button>
+      </form>
+      </div>
+    </td>
+  </tr>
+  <tr class="item-detail">
+    <td colspan="5">
+      {% if row.message %}<p class="notice">{{ row.message }}</p>{% endif %}
+      {% if it.error %}<p class="error">{{ it.error }}</p>{% endif %}
+      {% if it.note %}<p class="muted">Hinweis: {{ it.note }}</p>{% endif %}
+      {% if row.conflict %}{% include "_conflict.html" %}{% endif %}
+      <div id="correct-{{ it.id }}"></div>
+    </td>
+  </tr>
+{% endif %}
+</tbody>
