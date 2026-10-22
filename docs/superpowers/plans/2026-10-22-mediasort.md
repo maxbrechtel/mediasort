@@ -387,7 +387,7 @@ def test_normalize_title():
   - Sprachen: guessit `language` (`de`, `mul` …) → zweistellig; `mul` bedeutet bei vorhandenem `de` zusätzlich `en`; `mul` selbst entfällt.
   - 3D: guessit `other` enthält `3D`; Format: `Half Side By Side`→`HSBS`, `Side By Side`→`SBS`, `Half Over Under`→`HOU`, `Over Under`→`OU`; zusätzlich Regex `\b(TAB|MVC)\b` im Namen.
   - Sample: `other` enthält `Sample` oder Name enthält `sample` (case-insensitiv).
-  - Ordner: `parent` wird immer geparst, wenn angegeben. Ist der Datei-Titel Müll oder fehlt → Titel, Jahr und Sprachen aus dem Ordner (Staffel/Folge aus der Datei, falls vorhanden). Sonst werden Jahr und Sprachen aus dem Ordner nur übernommen, wenn sie in der Datei fehlen **und** der normalisierte Ordnertitel mit dem normalisierten Dateititel beginnt oder gleich ist.
+  - Ordner: `parent` wird immer geparst, wenn angegeben. Ist der Datei-Titel Müll oder fehlt → Titel, Jahr und Sprachen aus dem Ordner (Staffel/Folge aus der Datei, falls vorhanden). Sonst werden Jahr und Sprachen aus dem Ordner nur übernommen, wenn sie in der Datei fehlen **und** der normalisierte Dateititel als ganze Wörter im normalisierten Ordnertitel enthalten ist (z. B. `matrix` in `the matrix`, `the continental` in `the continental aus der welt von john wick`).
   - `is_garbage_title`: `None`, kürzer als 3 Zeichen, oder `^[a-z0-9]{8,}$` mit mindestens 2 Ziffern und keinem Leerzeichen.
 - [ ] **Step 4: Run** → PASS
 - [ ] **Step 5: Commit** `"Parser für Datei- und Ordnernamen"`
