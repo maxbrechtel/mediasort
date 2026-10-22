@@ -104,7 +104,8 @@ Scannen → parser → matcher (tmdb) → mediainfo → namer → planner (+ lib
   - Dateien, die in den letzten 10 Minuten geändert wurden
   - Dateien auf der Ignorierliste
 - **Sample:** Video unter 100 MB oder mit `sample` im Namen. Samples erzeugen keinen
-  Vorschlag und werden beim Aufräumen gelöscht.
+  Vorschlag. Kleine Videos ohne `sample` im Namen erscheinen als Hinweis zum Scan.
+  Gelöscht wird beim Aufräumen nur, was nach Name ein Sample ist (siehe 7.4).
 - **Untertitel zuordnen:** Ein Untertitel gehört zu einem Video, wenn er im selben
   Ordner oder in einem Unterordner `Subs`/`Subtitles` liegt und
   - sein Name mit dem Namen des Videos beginnt, oder
@@ -266,7 +267,16 @@ Vorschlag erscheint als Fehler.
   ermittelt und gespeichert.
 - **Konflikt:** Derselbe Film bzw. dieselbe Folge (gleiche TMDB-ID, bei Serien
   dieselbe Staffel und Folge) liegt bereits in der Bibliothek, egal unter welchem
-  Namen. Ebenso, wenn der exakte Zielpfad schon existiert.
+  Namen. Ebenso, wenn der exakte Zielpfad schon existiert oder ein anderer offener
+  Vorschlag (auch aus einem früheren Scan) denselben Film bzw. dieselbe Folge betrifft.
+- **Vorhandene Versionen** eines Films sind nur Videos direkt im Filmordner, ab der
+  Sample-Grenze, ohne Plex-Extras (`-trailer`, `-featurette` … und Unterordner wie
+  `Featurettes`). Filme in verschiedenen Bibliotheken (2D/3D) sind nie Dubletten.
+- Deckt eine vorhandene Datei Folgen ab, die die neue nicht enthält (Doppelfolge),
+  wird „Neue Version behalten“ nicht angeboten. Bei Treffern nur über den Titel
+  (Ordner ohne Jahr und ohne TMDB-ID) gibt es keinen Vorschlag.
+- Größe und Änderungszeit jeder vorhandenen Version werden gespeichert und vor dem
+  Löschen erneut geprüft; hat sie sich verändert, wird nichts gelöscht.
 - **Besser** wird in dieser Reihenfolge bewertet: Auflösung → DV vor HDR vor SDR →
   Codec (av1 = h265 > h264 > Rest) → deutsche Tonspur vorhanden →
   Rang der gewählten Tonspur → Dateigröße. Bei ISO-Dateien ohne technische
@@ -297,14 +307,19 @@ Fehler betreffen nur den einzelnen Vorschlag, der Auftrag läuft weiter.
 ### 7.4 Aufräumen
 
 - Ursprungsordner ist der Ordner, in dem das Video lag.
-- Er wird **samt Inhalt gelöscht**, wenn darin (rekursiv) kein Video über der
-  Sample-Grenze mehr liegt. Sonst bleibt er unverändert und wird in der
-  Oberfläche markiert.
+- Er wird **samt Inhalt gelöscht**, wenn darin (rekursiv) nichts mehr liegt, was
+  verloren gehen könnte. Das Löschen wird verhindert durch:
+  - jede Videodatei (breite Liste inkl. mpg, vob, webm …), egal wie groß, außer
+    Samples nach Name (Ordner `Sample(s)` oder Dateiname endet auf `sample`),
+  - unfertige Downloads (`.part`, `.!qB`, `.crdownload`) und Reste von mediasort,
+  - Dateien, die jünger als das Mindestalter sind,
+  - unbekannte Dateien ab der Sample-Grenze.
+  Sonst bleibt der Ordner unverändert und wird in der Oberfläche markiert.
 - **Nie gelöscht werden:** Eingangs- und Bibliotheks-Wurzelordner, Ordner aus der
   Ausschlussliste und deren übergeordnete Ordner.
 - Übergeordnete Ordner werden nicht mit gelöscht.
 - Im Bibliotheksmodus gilt dasselbe: Ein alter Film-, Serien- oder Staffelordner
-  wird gelöscht, sobald er kein Video mehr enthält. NFO-Dateien und Bilder von
+  wird nach denselben Regeln gelöscht. NFO-Dateien und Bilder von
   tinyMediaManager gehen dabei verloren. Das ist gewollt, weil Plex sie nicht braucht.
 
 ### 7.5 Modus „Bibliothek prüfen“
