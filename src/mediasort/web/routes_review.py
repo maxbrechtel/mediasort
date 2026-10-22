@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, Ignored, Item
-from mediasort.models import Confidence, ItemStatus, MediaInfo, MediaKind
+from mediasort.models import Confidence, ItemStatus, MediaInfo, MediaKind, forbidden_decisions
 from mediasort.planner import ItemNotFound, NotReplannable, RootMissing, mediainfo_from_json
 from mediasort.quality import (
     audio_codec_label,
@@ -58,9 +58,20 @@ DECISION_LABELS = {
 }
 _BETTER_LABELS = {"keep_new": f"Bessere behalten (neue Version) – {_DELETES_EXISTING}",
                   "keep_existing": f"Bessere behalten (vorhandene Version) – {_DELETES_NEW}"}
-PARTIAL_HINT = ("Die vorhandene Datei enthält weitere Folgen und kann deshalb nicht durch die neue "
-                "Version ersetzt werden – bitte selbst entscheiden.")
-PARTIAL_NO_KEEP_NEW = "Die vorhandene Datei enthält weitere Folgen – „Neue Version behalten“ ist hier nicht möglich."
+# gesperrte Entscheidungen (``forbidden_decisions``) -> Hinweis im Konflikt
+PARTIAL_HINTS = {
+    frozenset({"keep_new"}): ("Die vorhandene Datei enthält weitere Folgen und kann deshalb nicht durch die "
+                              "neue Version ersetzt werden – bitte selbst entscheiden."),
+    frozenset({"keep_existing"}): ("Die neue Datei enthält weitere Folgen und darf deshalb nicht zugunsten "
+                                   "der vorhandenen gelöscht werden – bitte selbst entscheiden."),
+    frozenset({"keep_new", "keep_existing"}): ("Beide Dateien enthalten Folgen, die der anderen fehlen – "
+                                               "keine darf gelöscht werden."),
+}
+# gesperrte Entscheidung -> Meldung beim Versuch, sie trotzdem zu wählen
+PARTIAL_REFUSALS = {
+    "keep_new": "Die vorhandene Datei enthält weitere Folgen – „Neue Version behalten“ ist hier nicht möglich.",
+    "keep_existing": "Die neue Datei enthält weitere Folgen – „Vorhandene behalten“ ist hier nicht möglich.",
+}
 CONFLICT_HEADINGS = {
     "library": "Konflikt: dieser Titel liegt schon in der Bibliothek",
     "scan": "Konflikt: dieser Titel liegt bereits in diesem Scan vor",
@@ -196,12 +207,14 @@ def blocked_reason(item: Item) -> str | None:
 def decision_options(item: Item) -> list[tuple[str, str]]:
     """„Bessere behalten“ (bzw. beide Richtungen ohne Vorschlag), „Beide behalten“, „Überspringen“.
 
-    Enthält eine vorhandene Datei weitere Folgen (``partial``), gibt es „Neue Version behalten“ nicht.
+    Würde eine Seite Folgen verlieren (``forbidden_decisions``), wird sie nicht angeboten: Enthält eine
+    vorhandene Datei weitere Folgen, fehlt „Neue Version behalten“; enthält die neue weitere Folgen,
+    fehlt „Vorhandene behalten“.
     """
     conflict = item.conflict_json or {}
     suggestion = conflict.get("suggestion")
-    if conflict.get("partial"):
-        options = [("keep_existing", DECISION_LABELS["keep_existing"])]
+    if forbidden := forbidden_decisions(conflict):
+        options = [(d, DECISION_LABELS[d]) for d in ("keep_new", "keep_existing") if d not in forbidden]
     elif suggestion in _BETTER_LABELS:
         options = [(suggestion, _BETTER_LABELS[suggestion])]
     else:
@@ -250,7 +263,8 @@ def _conflict_view(item: Item) -> ConflictView | None:
     suggestion = item.conflict_json.get("suggestion")
     options = decision_options(item)
     labels = dict(options)
-    hint = PARTIAL_HINT if item.conflict_json.get("partial") else SUGGESTION_TEXTS.get(suggestion, SUGGESTION_TEXTS[None])
+    forbidden = forbidden_decisions(item.conflict_json)
+    hint = PARTIAL_HINTS[forbidden] if forbidden else SUGGESTION_TEXTS.get(suggestion, SUGGESTION_TEXTS[None])
     return ConflictView(
         heading=_conflict_heading(item.conflict_json),
         existing=_existing_views(item.conflict_json),
@@ -499,8 +513,8 @@ def decide(request: Request, item_id: int, form: Form):
         if not item.conflict_json or item.status not in (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value):
             return _row_response(request, item_id, 409, "Hier gibt es nichts zu entscheiden.")
         if decision not in dict(decision_options(item)):
-            if decision == "keep_new" and item.conflict_json.get("partial"):
-                return _row_response(request, item_id, 409, PARTIAL_NO_KEEP_NEW)
+            if decision in forbidden_decisions(item.conflict_json):
+                return _row_response(request, item_id, 409, PARTIAL_REFUSALS[decision])
             return _row_response(request, item_id, 409,
                                  "„Beide behalten“ geht nur, wenn die Zielnamen verschieden sind.")
         if decision == "skip":

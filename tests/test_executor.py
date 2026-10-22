@@ -317,7 +317,7 @@ class Env:
 
     def item(self, source: str, target: str | None, *, subs=(), existing=None, suggestion=None,
              decision=None, status="confirmed", data: bytes = b"video", scan_id=1, meta=False,
-             partial=None) -> Item:
+             partial=None, partial_existing=None, partial_new=None) -> Item:
         src = self.p(source)
         if not src.exists():
             write(src, data)
@@ -337,6 +337,10 @@ class Env:
                      "labels": None, "origin": "library"} for e in existing]
             if partial is not None:
                 conflict["partial"] = partial
+            if partial_existing is not None:
+                conflict["partial_existing"] = partial_existing
+            if partial_new is not None:
+                conflict["partial_new"] = partial_new
         with self.sf() as s:
             it = Item(source=str(src), size=st.st_size, mtime=st.st_mtime, kind="movie",
                       target=str(self.p(target)) if target else None, subtitles_json=sub_json,
@@ -847,19 +851,64 @@ def test_keep_new_refused_for_partial_conflict(env):
     old = "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv"
     write(env.p(old), b"doppelfolge")
     item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01.mkv", existing=[old],
-                    decision="keep_new", meta=True, partial=True)
+                    decision="keep_new", meta=True, partial=True, partial_existing=True, partial_new=False)
     r = run(env, item)
     assert r.failed == 1 and env.get(item.id).error == "Vorhandene Datei enthält weitere Folgen"
     assert env.p(old).exists() and env.p("Downloads/Rel/m.mkv").exists()
 
 
-def test_keep_existing_allowed_for_partial_conflict(env):
+def test_keep_existing_allowed_for_partial_existing_conflict(env):
     old = "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv"
     write(env.p(old), b"doppelfolge")
     item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01.mkv", existing=[old],
-                    decision="keep_existing", meta=True, partial=True)
+                    decision="keep_existing", meta=True, partial=True, partial_existing=True, partial_new=False)
     assert run(env, item).done == 1
     assert env.p(old).exists() and not env.p("Downloads/Rel/m.mkv").exists()
+
+
+def test_keep_existing_refused_for_partial_new_conflict(env):
+    # Abschlussprüfung R1: die neue Doppelfolge enthält eine Folge, die der vorhandenen Datei fehlt
+    old = "Serien/S (2020)/Staffel 1/S - S01E01.mkv"
+    write(env.p(old), b"einzelfolge")
+    item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv", existing=[old],
+                    decision="keep_existing", meta=True, partial=True, partial_existing=False, partial_new=True)
+    r = run(env, item)
+    assert r.failed == 1 and env.get(item.id).error == "Neue Datei enthält weitere Folgen"
+    assert env.p(old).exists() and env.p("Downloads/Rel/m.mkv").exists()
+    assert env.history() == []
+
+
+def test_keep_new_allowed_for_partial_new_conflict(env):
+    old = "Serien/S (2020)/Staffel 1/S - S01E01.mkv"
+    write(env.p(old), b"einzelfolge")
+    item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv", existing=[old],
+                    decision="keep_new", meta=True, partial=True, partial_existing=False, partial_new=True)
+    assert run(env, item).done == 1
+    assert not env.p(old).exists() and env.p("Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv").exists()
+
+
+@pytest.mark.parametrize("decision, error", [
+    ("keep_new", "Vorhandene Datei enthält weitere Folgen"),
+    ("keep_existing", "Neue Datei enthält weitere Folgen"),
+])
+def test_old_partial_row_refuses_both_deletions(env, decision, error):
+    # ältere Einträge kennen nur ``partial``: die Richtung ist unbekannt, also wird nichts gelöscht
+    old = "Serien/S (2020)/Staffel 1/S - S01E02-E03.mkv"
+    write(env.p(old), b"doppelfolge")
+    item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv", existing=[old],
+                    decision=decision, meta=True, partial=True)
+    r = run(env, item)
+    assert r.failed == 1 and env.get(item.id).error == error
+    assert env.p(old).exists() and env.p("Downloads/Rel/m.mkv").exists()
+
+
+def test_old_partial_row_allows_keep_both(env):
+    old = "Serien/S (2020)/Staffel 1/S - S01E02-E03.mkv"
+    write(env.p(old), b"doppelfolge")
+    item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv", existing=[old],
+                    decision="keep_both", meta=True, partial=True)
+    assert run(env, item).done == 1
+    assert env.p(old).exists() and env.p("Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv").exists()
 
 
 # --- Abschlussprüfung I5: SMB ohne Groß-/Kleinschreibung -------------------------------------

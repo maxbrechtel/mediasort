@@ -1,8 +1,10 @@
 """Gemeinsame Datentypen von mediasort."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 
 class MediaKind(StrEnum):
@@ -29,6 +31,21 @@ class ItemStatus(StrEnum):
     IGNORED = "ignored"
     DONE = "done"
     ERROR = "error"
+
+
+def forbidden_decisions(conflict: Mapping[str, Any] | None) -> frozenset[str]:
+    """Entscheidungen, bei denen eine Folge verloren ginge (Spec 7.2, Abschlussprüfung R1).
+
+    ``partial_existing``: eine vorhandene Datei enthält Folgen, die der neuen fehlen – kein ``keep_new``.
+    ``partial_new``: die neue Datei enthält Folgen, die einer vorhandenen fehlen – kein ``keep_existing``.
+    Ältere Einträge kennen nur ``partial`` ohne Richtung: dann ist beides gesperrt.
+    """
+    conflict = conflict or {}
+    if "partial_existing" in conflict or "partial_new" in conflict:
+        existing_more, new_more = bool(conflict.get("partial_existing")), bool(conflict.get("partial_new"))
+    else:
+        existing_more = new_more = bool(conflict.get("partial"))
+    return frozenset(d for d, refused in (("keep_new", existing_more), ("keep_existing", new_more)) if refused)
 
 
 class AutoLevel(StrEnum):

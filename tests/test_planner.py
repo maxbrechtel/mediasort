@@ -15,6 +15,7 @@ from mediasort.models import MediaKind
 from mediasort.planner import PlanContext, RootMissing, plan_folder, replan_item, target_root
 from mediasort.settings import Settings
 from mediasort.tmdb import TmdbClient
+from mediasort.web.routes_review import decision_options
 
 DEFAULT_INFO = MI(1920, 1080, "h264", None, [A("dts", "de", 6), A("ac3", "en", 6)])
 UHD_DE = MI(3840, 2160, "hevc", "HDR", [A("eac3", "de", 6)])
@@ -500,6 +501,7 @@ def test_multi_episode_overlap_in_batch_is_conflict(env):
     # die vorhandene Doppelfolge enthält E05, die neue Datei nicht: kein Vorschlag (Abschlussprüfung C2)
     conflict = second.conflict_json
     assert (conflict["existing"], conflict["suggestion"], conflict["partial"]) == ([first.source], None, True)
+    assert (conflict["partial_existing"], conflict["partial_new"]) == (True, False)
 
 
 def test_unchanged_error_file_is_not_planned_again(env):
@@ -596,17 +598,79 @@ def test_single_episode_vs_existing_double_episode_is_partial(env):
     [it] = env.plan("Downloads").items()
     assert it.conflict_json["existing"] == [str(double)]
     assert it.conflict_json["partial"] is True and it.conflict_json["suggestion"] is None
+    assert (it.conflict_json["partial_existing"], it.conflict_json["partial_new"]) == (True, False)
+    assert [o for o, _ in decision_options(it)] == ["keep_existing", "keep_both", "skip"]
     r = _execute(env, it.id, "keep_new")
     assert r.failed == 1 and env.item(it.id).error == "Vorhandene Datei enthält weitere Folgen"
     assert double.exists() and src.exists()
 
 
-def test_double_episode_vs_existing_single_is_not_partial(env):
+def test_better_double_episode_vs_existing_single_is_partial_new(env):
+    # neue Doppelfolge ersetzt die vorhandene Einzelfolge: erlaubt, es geht keine Folge verloren
     single = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - 720p.mkv", SMALL_INFO)
     env.file("Downloads/Reacher.S04E01E02.German.DL.2160p.WEB/x.mkv", UHD_DE)
     [it] = env.plan("Downloads").items()
     assert it.conflict_json["existing"] == [str(single)]
-    assert it.conflict_json["partial"] is False and it.conflict_json["suggestion"] == "keep_new"
+    assert (it.conflict_json["partial_existing"], it.conflict_json["partial_new"]) == (False, True)
+    assert it.conflict_json["partial"] is True and it.conflict_json["suggestion"] is None
+    assert [o for o, _ in decision_options(it)] == ["keep_new", "keep_both", "skip"]
+    assert _execute(env, it.id, "keep_new").done == 1
+    assert not single.exists() and Path(env.item(it.id).target).exists()
+
+
+def test_worse_double_episode_vs_existing_single_keeps_only_copy(env):
+    # Abschlussprüfung R1: die neue Doppelfolge ist die einzige Kopie von E02
+    single = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - 2160p.mkv", UHD_DE)
+    new = env.file("Downloads/Reacher.S04E01E02.German.720p.WEB/Reacher.S04E01E02.German.720p.WEB.mkv",
+                   SMALL_INFO)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json["existing"] == [str(single)]
+    assert (it.conflict_json["partial_existing"], it.conflict_json["partial_new"]) == (False, True)
+    assert it.conflict_json["suggestion"] is None
+    assert "keep_existing" not in dict(decision_options(it))
+    r = _execute(env, it.id, "keep_existing")
+    assert r.failed == 1 and env.item(it.id).error == "Neue Datei enthält weitere Folgen"
+    assert new.exists() and single.exists()
+
+
+def test_mixed_episode_overlap_allows_no_deletion(env):
+    # Abschlussprüfung R1: neu E01–E02, vorhanden E02–E03 – jede Seite hat eine Folge, die der anderen fehlt
+    existing = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E02-E03 - 2160p.mkv", UHD_DE)
+    new = env.file("Downloads/Reacher.S04E01E02.German.720p.WEB/Reacher.S04E01E02.German.720p.WEB.mkv",
+                   SMALL_INFO)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json["existing"] == [str(existing)]
+    assert (it.conflict_json["partial_existing"], it.conflict_json["partial_new"]) == (True, True)
+    assert it.conflict_json["partial"] is True and it.conflict_json["suggestion"] is None
+    assert [o for o, _ in decision_options(it)] == ["keep_both", "skip"]
+    r = _execute(env, it.id, "keep_existing")
+    assert r.failed == 1 and env.item(it.id).error == "Neue Datei enthält weitere Folgen"
+    r = _execute(env, it.id, "keep_new")
+    assert r.failed == 1 and env.item(it.id).error == "Vorhandene Datei enthält weitere Folgen"
+    assert new.exists() and existing.exists()
+    assert _execute(env, it.id, "keep_both").done == 1
+    assert existing.exists() and Path(env.item(it.id).target).exists()
+
+
+def test_double_episode_vs_two_existing_singles_is_partial_new(env):
+    # jede vorhandene Datei für sich fehlt eine Folge der neuen: „Vorhandene behalten“ gesperrt
+    e1 = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - 2160p.mkv", UHD_DE)
+    e2 = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E02 - 2160p.mkv", UHD_DE)
+    env.file("Downloads/Reacher.S04E01E02.German.720p.WEB/x.mkv", SMALL_INFO)
+    [it] = env.plan("Downloads").items()
+    assert sorted(it.conflict_json["existing"]) == sorted([str(e1), str(e2)])
+    assert (it.conflict_json["partial_existing"], it.conflict_json["partial_new"]) == (False, True)
+    assert it.conflict_json["suggestion"] is None
+
+
+def test_double_episode_after_single_in_batch_is_partial_new(env):
+    env.file("Downloads/Reacher.S04E01.German.DL.2160p.WEB/a.mkv", UHD_DE)
+    env.file("Downloads/Reacher.S04E01E02.German.720p.WEB/b.mkv", SMALL_INFO)
+    first, second = env.plan("Downloads").items()
+    assert first.conflict_json is None
+    conflict = second.conflict_json
+    assert conflict["existing"] == [first.source]
+    assert (conflict["partial_existing"], conflict["partial_new"], conflict["suggestion"]) == (False, True, None)
 
 
 def test_title_only_library_match_has_no_suggestion(env):

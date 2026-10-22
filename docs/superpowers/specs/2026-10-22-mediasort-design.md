@@ -272,9 +272,15 @@ Vorschlag erscheint als Fehler.
 - **Vorhandene Versionen** eines Films sind nur Videos direkt im Filmordner, ab der
   Sample-Grenze, ohne Plex-Extras (`-trailer`, `-featurette` … und Unterordner wie
   `Featurettes`). Filme in verschiedenen Bibliotheken (2D/3D) sind nie Dubletten.
-- Deckt eine vorhandene Datei Folgen ab, die die neue nicht enthält (Doppelfolge),
-  wird „Neue Version behalten“ nicht angeboten. Bei Treffern nur über den Titel
-  (Ordner ohne Jahr und ohne TMDB-ID) gibt es keinen Vorschlag.
+- **Doppelfolgen** werden in beide Richtungen geprüft, damit keine Folge verloren geht:
+  - Deckt eine vorhandene Datei Folgen ab, die die neue nicht enthält, wird
+    „Neue Version behalten“ nicht angeboten und beim Ausführen abgelehnt.
+  - Enthält die neue Datei Folgen, die einer vorhandenen Datei fehlen, wird
+    „Vorhandene behalten“ nicht angeboten und beim Ausführen abgelehnt.
+  - Trifft beides zu (z. B. neu E01–E02, vorhanden E02–E03), bleiben nur
+    „Beide behalten“ und „Überspringen“.
+  In all diesen Fällen gibt es keinen Vorschlag. Bei Treffern nur über den Titel
+  (Ordner ohne Jahr und ohne TMDB-ID) gibt es ebenfalls keinen Vorschlag.
 - Größe und Änderungszeit jeder vorhandenen Version werden gespeichert und vor dem
   Löschen erneut geprüft; hat sie sich verändert, wird nichts gelöscht.
 - **Besser** wird in dieser Reihenfolge bewertet: Auflösung → DV vor HDR vor SDR →

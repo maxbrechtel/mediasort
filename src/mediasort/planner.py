@@ -364,8 +364,10 @@ class _Run:
         """Vorhandene Versionen desselben Titels (Spec 7.2, Abschlussprüfung C2).
 
         ``existing``: Pfade; ``existing_meta``: je Pfad Größe, Änderungszeit, Kurzbeschreibung und
-        Herkunft (zum Prüfen vor dem Löschen); ``partial``: eine vorhandene Datei enthält Folgen, die
-        die neue nicht hat (dann darf die neue sie nicht ersetzen); ``suggestion``: bessere Version.
+        Herkunft (zum Prüfen vor dem Löschen); ``partial_existing``: eine vorhandene Datei enthält
+        Folgen, die die neue nicht hat (dann darf die neue sie nicht ersetzen); ``partial_new``: die
+        neue Datei enthält Folgen, die einer vorhandenen fehlen (dann darf die neue nicht gelöscht
+        werden); ``partial``: eines von beiden; ``suggestion``: bessere Version.
         """
         index = self.index(library, kind)
         # Pfad -> bekannte Version (Quelle eines anderen Vorschlags) oder None (liegt in der Bibliothek)
@@ -399,7 +401,7 @@ class _Run:
 
         meta: list[dict[str, Any]] = []
         versions: list[tuple[MediaInfo | None, int | None]] = []
-        partial = False
+        partial_existing = partial_new = False
         for path, known in found.items():
             if known is not None:
                 v_info, v_size, v_mtime, origin = known.info, known.size, known.mtime, known.origin
@@ -407,13 +409,16 @@ class _Run:
             else:
                 v_info, v_size, v_mtime, origin = self._inspect(Path(path))
                 covered = coverage[path] if path in coverage else self._parsed_episodes(Path(path))
-            if kind == MediaKind.EPISODE and set(covered) - set(episodes):
-                partial = True
+            if kind == MediaKind.EPISODE:
+                partial_existing = partial_existing or bool(set(covered) - set(episodes))
+                partial_new = partial_new or bool(set(episodes) - set(covered))
             meta.append({"path": path, "size": v_size, "mtime": v_mtime,
                          "labels": short_label(v_info) if v_info is not None else None, "origin": origin})
             versions.append((v_info, v_size))
+        partial = partial_existing or partial_new
         suggestion = None if partial or title_only else self._suggestion(versions, info, size)
-        return {"existing": list(found), "suggestion": suggestion, "partial": partial, "existing_meta": meta}
+        return {"existing": list(found), "suggestion": suggestion, "partial": partial,
+                "partial_existing": partial_existing, "partial_new": partial_new, "existing_meta": meta}
 
     def _inspect(self, path: Path) -> tuple[MediaInfo | None, int | None, float | None, str]:
         """(MediaInfo, Größe, Änderungszeit, Herkunft) einer Datei in der Bibliothek; ``None``, wo unbekannt."""

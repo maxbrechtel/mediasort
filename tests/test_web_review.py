@@ -657,7 +657,8 @@ def test_conflict_lists_existing_files_with_size_and_labels(client, planned_conf
 def test_partial_conflict_offers_no_keep_new(client, planned_conflict):
     env = client.env
     item = env.item(MATRIX_FILE)
-    env.update(item.id, conflict_json={**item.conflict_json, "suggestion": None, "partial": True})
+    env.update(item.id, conflict_json={**item.conflict_json, "suggestion": None, "partial": True,
+                                       "partial_existing": True, "partial_new": False})
     t = client.get("/review").text
     assert "Neue Version behalten" not in t and "Bessere behalten" not in t
     assert "Vorhandene behalten – die neue Datei wird samt Untertiteln gelöscht" in t
@@ -668,6 +669,45 @@ def test_partial_conflict_offers_no_keep_new(client, planned_conflict):
     assert env.get(item.id).decision is None
     client.post(f"/items/{item.id}/decision", data={"decision": "keep_existing"})
     assert env.get(item.id).decision == "keep_existing"
+
+
+def test_partial_new_conflict_offers_no_keep_existing(client, planned_conflict):
+    # Abschlussprüfung R1: die neue Datei enthält Folgen, die der vorhandenen fehlen
+    env = client.env
+    item = env.item(MATRIX_FILE)
+    env.update(item.id, conflict_json={**item.conflict_json, "suggestion": None, "partial": True,
+                                       "partial_existing": False, "partial_new": True})
+    t = client.get("/review").text
+    assert "Vorhandene behalten" not in t and "Bessere behalten" not in t
+    assert "Neue Version behalten – die vorhandene Version wird samt Untertiteln gelöscht" in t
+    assert "Beide behalten" in t and "Überspringen" in t
+    assert "Die neue Datei enthält weitere Folgen" in t
+    r = client.post(f"/items/{item.id}/decision", data={"decision": "keep_existing"}, headers=HX)
+    assert r.status_code == 409 and "Die neue Datei enthält weitere Folgen" in r.text
+    assert env.get(item.id).decision is None
+    client.post(f"/items/{item.id}/decision", data={"decision": "keep_new"})
+    assert env.get(item.id).decision == "keep_new"
+
+
+@pytest.mark.parametrize("flags", [
+    {"partial_existing": True, "partial_new": True},
+    {},  # ältere Einträge kennen nur ``partial``
+])
+def test_two_sided_partial_conflict_offers_no_deletion(client, planned_conflict, flags):
+    env = client.env
+    item = env.item(MATRIX_FILE)
+    conflict = {k: v for k, v in item.conflict_json.items() if k not in ("partial_existing", "partial_new")}
+    env.update(item.id, conflict_json={**conflict, "suggestion": None, "partial": True, **flags})
+    t = client.get("/review").text
+    assert "Vorhandene behalten" not in t and "Neue Version behalten" not in t and "Bessere behalten" not in t
+    assert "Beide behalten – nichts wird gelöscht" in t and "Überspringen" in t
+    assert "Beide Dateien enthalten Folgen, die der anderen fehlen" in t
+    for decision in ("keep_new", "keep_existing"):
+        r = client.post(f"/items/{item.id}/decision", data={"decision": decision}, headers=HX)
+        assert r.status_code == 409 and "enthält weitere Folgen" in r.text
+        assert env.get(item.id).decision is None
+    client.post(f"/items/{item.id}/decision", data={"decision": "keep_both"})
+    assert env.get(item.id).decision == "keep_both"
 
 
 def test_batch_conflict_heading_names_this_scan(client, env):

@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, History, Item, casefold
-from mediasort.models import ItemStatus
+from mediasort.models import ItemStatus, forbidden_decisions
 from mediasort.scanner import (
     PARTIAL_EXT,
     SUB_EXT,
@@ -38,7 +38,11 @@ UNDECIDED = "Konflikt nicht entschieden"
 TARGET_TAKEN = "Ziel belegt"
 SOURCE_CHANGED = "Quelle wurde seit dem Scan verändert"
 EXISTING_CHANGED = "Vorhandene Datei hat sich seit dem Scan verändert"
-PARTIAL_REFUSED = "Vorhandene Datei enthält weitere Folgen"
+# Entscheidung -> Grund, warum sie eine Folge verlieren würde (``models.forbidden_decisions``)
+PARTIAL_REFUSED = {
+    "keep_new": "Vorhandene Datei enthält weitere Folgen",
+    "keep_existing": "Neue Datei enthält weitere Folgen",
+}
 _DECISIONS = (None, "keep_new", "keep_existing", "keep_both")
 # Beiwerk, das beim Aufräumen unabhängig von der Größe mitgelöscht werden darf
 LEFTOVER_EXT = frozenset({
@@ -444,8 +448,8 @@ class _ItemRun:
         conflict = item.conflict_json or {}
         if conflict and decision is None:
             raise _Failed(UNDECIDED)
-        if decision == "keep_new" and conflict.get("partial"):
-            raise _Failed(PARTIAL_REFUSED)
+        if decision in forbidden_decisions(conflict):
+            raise _Failed(PARTIAL_REFUSED[decision])
 
         source = Path(item.source)
         try:
