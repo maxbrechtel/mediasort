@@ -58,6 +58,14 @@ class NoTarget(Exception):
     """Für diese Art von Datei ist keine Zielbibliothek eingetragen (Meldung auf Deutsch)."""
 
 
+class ItemNotFound(KeyError):
+    """Der zu korrigierende Vorschlag existiert nicht (mehr)."""
+
+
+class NotReplannable(ValueError):
+    """Der Vorschlag ist in einem Status, der keine Korrektur zulässt (Meldung auf Deutsch)."""
+
+
 # --- Zielbibliothek -----------------------------------------------------------------
 
 
@@ -125,7 +133,8 @@ def _parsed_from_json(data: dict[str, Any]) -> ParsedName:
     )
 
 
-def _info_from_json(data: dict[str, Any] | None) -> MediaInfo | None:
+def mediainfo_from_json(data: dict[str, Any] | None) -> MediaInfo | None:
+    """``MediaInfo`` aus ``Item.mediainfo_json``."""
     if data is None:
         return None
     return MediaInfo(
@@ -553,7 +562,7 @@ def _replan(
         run.season_check(cand.tmdb_id, season).apply(item)
 
     if item.mediainfo_json is not None:
-        info = _info_from_json(item.mediainfo_json)
+        info = mediainfo_from_json(item.mediainfo_json)
     else:
         try:
             info = run.ctx.probe(Path(item.source))
@@ -589,9 +598,9 @@ def replan_item(
     with ctx.session_factory() as s:
         item = s.get(Item, item_id)
         if item is None:
-            raise KeyError(f"Vorschlag {item_id} nicht gefunden")
+            raise ItemNotFound(f"Vorschlag {item_id} nicht gefunden")
         if item.status not in _REPLANNABLE:
-            raise ValueError(f"Vorschlag {item_id} kann im Status „{item.status}“ nicht korrigiert werden")
+            raise NotReplannable(f"Vorschlag {item_id} kann im Status „{item.status}“ nicht korrigiert werden")
         folders = {f.id: f for f in s.scalars(select(Folder))}
         others = list(s.scalars(select(Item).where(Item.scan_id == item.scan_id, Item.id != item.id)))
 
@@ -610,7 +619,7 @@ def replan_item(
         if other not in group and other.status in _OPEN_STATUSES and other.target and other.tmdb_id:
             run.claim(
                 other.target, MediaKind(other.kind), other.tmdb_id, other.season, other.episodes_json or (),
-                (other.source, _info_from_json(other.mediainfo_json), other.size),
+                (other.source, mediainfo_from_json(other.mediainfo_json), other.size),
             )
 
     corrected = tmdb_ref is not None

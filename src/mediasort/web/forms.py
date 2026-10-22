@@ -24,6 +24,8 @@ _NUMBERS = {
 _TEXTS = ("tmdb_key", "language", "season_label", "plex_url", "plex_token")
 _CHECKBOXES = ("auto_enabled", "confirmed_trash_warning")
 _REQUIRED = {"language": "Sprache", "season_label": "Staffelbezeichnung"}
+MAX_SEASON = 999  # größere Zahlen passen nicht in SQLite-INTEGER bzw. sind sicher Tippfehler
+MAX_EPISODE = 9999
 FORMATS_3D = ("SBS", "HSBS", "OU", "HOU", "TAB", "MVC")
 CORRECTION_FIELDS = ("reference", "season", "episodes", "format_3d")
 BAD_REFERENCE = ("Bitte eine TMDB-/IMDb-ID oder einen Link angeben (z. B. tmdb:movie:603, "
@@ -154,13 +156,10 @@ def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
             **parse_folder_options(form, role, library_ids)}
 
 
-def _int_at_least(raw: str, label: str, minimum: int) -> int:
-    try:
-        number = int(raw)
-    except ValueError:
-        number = None
-    if number is None or number < minimum:
-        raise FormError(f"„{label}“ muss eine ganze Zahl ab {minimum} sein")
+def _int_between(raw: str, label: str, minimum: int, maximum: int) -> int:
+    number = int(raw) if raw.isascii() and raw.isdigit() else None
+    if number is None or not minimum <= number <= maximum:
+        raise FormError(f"„{label}“ muss eine ganze Zahl von {minimum} bis {maximum} sein")
     return number
 
 
@@ -176,13 +175,13 @@ def parse_correction_form(form: FormData) -> dict:
         if tmdb_ref is None:
             raise FormError(BAD_REFERENCE)
     raw_season = str(form.get("season", "")).strip()
-    season = _int_at_least(raw_season, "Staffel", 0) if raw_season else None
+    season = _int_between(raw_season, "Staffel", 0, MAX_SEASON) if raw_season else None
     episodes = None
     raw_episodes = str(form.get("episodes", "")).strip()
     if raw_episodes:
         parts = [p.strip() for p in raw_episodes.split(",") if p.strip()]
-        if not parts or not all(p.isascii() and p.isdigit() and int(p) >= 1 for p in parts):
-            raise FormError("„Folgen“ bitte als Nummern mit Komma angeben (z. B. 1, 2)")
+        if not parts or not all(p.isascii() and p.isdigit() and 1 <= int(p) <= MAX_EPISODE for p in parts):
+            raise FormError(f"„Folgen“ bitte als Nummern von 1 bis {MAX_EPISODE} mit Komma angeben (z. B. 1, 2)")
         episodes = sorted({int(p) for p in parts})
     format_3d = str(form.get("format_3d", "")).strip() or None
     if format_3d is not None and format_3d not in FORMATS_3D:

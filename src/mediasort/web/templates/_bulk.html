@@ -1,0 +1,8 @@
+<div class="bulk" id="bulk" hx-get="/review/bulk" hx-trigger="items-changed from:body" hx-swap="outerHTML">
+  <form method="post" action="/items/confirm-safe">
+    <button type="submit" class="secondary"{% if not counts.safe %} disabled{% endif %}>Alle sicheren übernehmen ({{ counts.safe }})</button>
+  </form>
+  <form method="post" action="/execute" hx-post="/execute" hx-target="#current-job" hx-swap="outerHTML">
+    <button type="submit"{% if not counts.confirmed %} disabled{% endif %}>Ausgewählte ausführen ({{ counts.confirmed }})</button>
+  </form>
+</div>

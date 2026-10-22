@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from conftest import A, MI
 from mediasort.db import Folder, Ignored, Item, Job
+from mediasort.planner import ItemNotFound
 from mediasort.settings import load_settings, save_settings
 from mediasort.web.app import create_app
 
@@ -315,8 +316,10 @@ def test_conflict_shows_both_versions_and_suggestion(client, planned_conflict):
     t = client.get("/review").text
     assert str(env.existing) in t and str(env.media / MATRIX_FILE) in t
     assert "Vorschlag: die neue Version ist besser" in t
-    assert 'value="keep_new" checked' in t and "Bessere behalten" in t
-    assert "Beide behalten" in t and "Überspringen" in t
+    assert 'value="keep_new" checked' in t
+    assert "Bessere behalten (neue Version) – die vorhandene Version wird samt Untertiteln gelöscht" in t
+    assert "Beide behalten – nichts wird gelöscht" in t and "Überspringen – nichts wird verändert" in t
+    assert "gelöscht wird erst beim Ausführen" in t
     assert "Bitte zuerst entscheiden" in t
 
     r = client.post(f"/items/{item.id}/toggle", headers=HX)
@@ -338,7 +341,9 @@ def test_conflict_without_suggestion_offers_both_options(client, planned_conflic
     item = env.item(MATRIX_FILE)
     env.update(item.id, conflict_json={**item.conflict_json, "suggestion": None})
     t = client.get("/review").text
-    assert "Neue Version behalten" in t and "Vorhandene behalten" in t and "Bessere behalten" not in t
+    assert "Neue Version behalten – die vorhandene Version wird samt Untertiteln gelöscht" in t
+    assert "Vorhandene behalten – die neue Datei wird samt Untertiteln gelöscht" in t
+    assert "Bessere behalten" not in t
     client.post(f"/items/{item.id}/decision", data={"decision": "keep_existing"})
     assert (env.get(item.id).status, env.get(item.id).decision) == ("confirmed", "keep_existing")
 
@@ -406,7 +411,7 @@ def test_correct_by_imdb_link(client, planned):
     r = client.post(f"/items/{item.id}/correct", headers=HX,
                     data={"reference": "https://www.imdb.com/title/tt0133093/", "season": "", "episodes": "",
                           "format_3d": ""})
-    assert r.status_code == 200 and r.headers.get("HX-Refresh") == "true"
+    assert r.status_code == 200 and r.headers.get("HX-Refresh") == "true" and r.text == ""
     after = env.get(item.id)
     assert after.tmdb_id == 603 and after.confidence == "hoch"
     assert after.target.startswith(str(env.media / "Filme_2D" / "Matrix (1999)") + "/")
@@ -558,3 +563,82 @@ def test_unknown_item_routes(client):
     assert client.post("/items/999/correct", data={"reference": ""}).status_code == 404
     assert client.post("/items/999/ignore").status_code == 404
     assert client.post("/items/999/decision", data={"decision": "skip"}).status_code == 404
+
+
+# --- Nachbesserungen (Review-Runde 1) ------------------------------------------------------
+
+
+def test_correct_rejects_huge_numbers(client, planned):
+    env = client.env
+    item = env.item(REACHER_FILES[0])
+    r = client.post(f"/items/{item.id}/correct", data={"season": "99999999999999999999999"}, headers=HX)
+    assert r.status_code == 400 and "„Staffel“ muss eine ganze Zahl von 0 bis 999 sein" in r.text
+    r = client.post(f"/items/{item.id}/correct", data={"episodes": "1, 10000"}, headers=HX)
+    assert r.status_code == 400 and "1 bis 9999" in r.text
+    r = client.post(f"/items/{item.id}/correct", data={"season": "999", "episodes": "9999"}, headers=HX)
+    assert r.status_code == 200
+    assert (env.get(item.id).season, env.get(item.id).episodes_json) == (999, [9999])
+
+
+def test_old_name_relative_to_input_folder(client, planned):
+    env = client.env
+    t = client.get("/review").text
+    assert "<code title=\"" + str(env.media / REACHER_FILES[0]) + "\">Reacher.S04E01.German.DL.1080P.WEBRip.h265-WOTT/x.mkv</code>" in t
+    assert "The.Matrix.1999.1080p.BluRay.x264-GRP/The.Matrix.1999.1080p.BluRay.x264-GRP.mkv</code>" in t
+    assert ">Voellig.Unbekannt.2020.1080p.mkv</code>" in t
+
+
+def test_series_grouped_by_target_folders(client, planned):
+    env = client.env
+    ep1, ep2, ep3 = (env.item(rel).id for rel in REACHER_FILES)
+    env.update(ep3, target=str(env.media / "Serien" / "Jack Reacher (2022)" / "Staffel 4" / "x.mkv"))
+    env.update(ep2, target=None)
+    t = client.get("/review").text
+    assert t.count("<h3>Reacher (2022) <small class=\"muted\">in Serien</small></h3>") == 1
+    assert "<h3>Jack Reacher (2022) <small class=\"muted\">in Serien</small></h3>" in t
+    assert "<h3>Reacher (2022)</h3>" in t  # ohne Ziel: nach TMDB-Titel
+    assert t.count("<h4>Staffel 4</h4>") == 3
+
+
+def test_new_item_with_error_text_is_warning_and_confirmable(client, planned):
+    env = client.env
+    ep = env.item(REACHER_FILES[0]).id
+    env.update(ep, error="Staffel 4 konnte bei TMDB nicht geprüft werden")
+    t = client.get("/review").text
+    assert '<p class="notice">Hinweis: Staffel 4 konnte bei TMDB nicht geprüft werden</p>' in t
+    r = client.post(f"/items/{ep}/toggle", headers=HX)
+    assert r.status_code == 200 and env.get(ep).status == "confirmed"
+    client.post(f"/items/{ep}/toggle")
+    client.post("/items/confirm-safe")
+    assert env.get(ep).status == "new"
+
+
+def test_replan_surfaces_unexpected_errors(client, planned, monkeypatch):
+    services = client.app.state.services
+    item = client.env.item(UNKNOWN_FILE)
+
+    def broken(item_id, **kw):
+        raise KeyError("kaputt")
+
+    monkeypatch.setattr(services, "replan", broken)
+    with pytest.raises(KeyError):
+        client.post(f"/items/{item.id}/replan", headers=HX)
+
+    def vanished(item_id, **kw):
+        raise ItemNotFound(item_id)
+
+    monkeypatch.setattr(services, "replan", vanished)
+    assert client.post(f"/items/{item.id}/replan", headers=HX).status_code == 404
+
+
+def test_bulk_buttons_show_counts(client, planned):
+    env = client.env
+    t = client.get("/review").text
+    assert "Alle sicheren übernehmen (4)" in t and "Ausgewählte ausführen (0)" in t
+    r = client.post(f"/items/{env.item(MATRIX_FILE).id}/toggle", headers=HX)
+    assert r.headers.get("HX-Trigger") == "items-changed"
+    r = client.get("/review/bulk", headers=HX)
+    assert "<html" not in r.text and 'hx-trigger="items-changed from:body"' in r.text
+    assert "Alle sicheren übernehmen (3)" in r.text and "Ausgewählte ausführen (1)" in r.text
+    r = client.post(f"/items/{env.item(UNKNOWN_FILE).id}/ignore", headers=HX)
+    assert r.headers.get("HX-Trigger") == "items-changed"

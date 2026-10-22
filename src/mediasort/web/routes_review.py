@@ -13,7 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, Ignored, Item
-from mediasort.models import AudioStream, Confidence, ItemStatus, MediaInfo, MediaKind
+from mediasort.models import Confidence, ItemStatus, MediaInfo, MediaKind
+from mediasort.planner import ItemNotFound, NotReplannable, mediainfo_from_json
 from mediasort.quality import (
     audio_codec_label,
     languages_tag,
@@ -47,14 +48,16 @@ SUGGESTION_TEXTS = {
     "keep_existing": "Vorschlag: die vorhandene Version ist besser.",
     None: "Kein Vorschlag möglich (technische Angaben fehlen oder beide gleichwertig) – bitte selbst entscheiden.",
 }
+_DELETES_EXISTING = "die vorhandene Version wird samt Untertiteln gelöscht"
+_DELETES_NEW = "die neue Datei wird samt Untertiteln gelöscht"
 DECISION_LABELS = {
-    "keep_new": "Neue Version behalten",
-    "keep_existing": "Vorhandene behalten",
-    "keep_both": "Beide behalten",
-    "skip": "Überspringen",
+    "keep_new": f"Neue Version behalten – {_DELETES_EXISTING}",
+    "keep_existing": f"Vorhandene behalten – {_DELETES_NEW}",
+    "keep_both": "Beide behalten – nichts wird gelöscht",
+    "skip": "Überspringen – nichts wird verändert",
 }
-_BETTER_LABELS = {"keep_new": "Bessere behalten (neue Version)",
-                  "keep_existing": "Bessere behalten (vorhandene Version)"}
+_BETTER_LABELS = {"keep_new": f"Bessere behalten (neue Version) – {_DELETES_EXISTING}",
+                  "keep_existing": f"Bessere behalten (vorhandene Version) – {_DELETES_NEW}"}
 _CHANNELS = {1: "1.0", 2: "2.0", 3: "2.1", 6: "5.1", 7: "6.1", 8: "7.1"}
 _VISIBLE = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value, ItemStatus.ERROR.value)
 _QUERY_YEAR = re.compile(r"^(?P<title>.*\S)\s+\(?(?P<year>(?:19|20)\d{2})\)?$")
@@ -94,14 +97,26 @@ class SeasonGroup:
 @dataclass
 class SeriesGroup:
     title: str
+    library: str | None = None  # Name der Bibliothek, wenn nach Zielordner gruppiert
     seasons: list[SeasonGroup] = field(default_factory=list)
 
 
-def _media_info(data: Mapping | None) -> MediaInfo | None:
-    if not data:
-        return None
-    return MediaInfo(width=data["width"], height=data["height"], video_codec=data["video_codec"],
-                     hdr=data.get("hdr"), audio=tuple(AudioStream(**a) for a in data.get("audio") or ()))
+@dataclass(frozen=True)
+class RowContext:
+    """Was zum Darstellen einer Zeile gebraucht wird: Bibliothekswurzeln und Ordnerpfade nach ID."""
+
+    roots: list[Path]
+    folders: dict[int, Path]
+
+
+def _row_context(request: Request, s: Session) -> RowContext:
+    folders = {folder_id: Path(path) for folder_id, path in s.execute(select(Folder.id, Folder.path))}
+    return RowContext(roots=request.app.state.services.library_roots(), folders=folders)
+
+
+def _library_of(path: Path, roots: Sequence[Path]) -> Path | None:
+    containing = [root for root in roots if path.is_relative_to(root)]
+    return max(containing, key=lambda r: len(r.parts)) if containing else None
 
 
 def tech_labels(info: MediaInfo | None, fallback_langs: Sequence[str]) -> list[str]:
@@ -128,6 +143,15 @@ def _subtitles_text(subs: Sequence[Mapping] | None) -> str | None:
     return "Untertitel: " + ", ".join(names)
 
 
+def _display_source(item: Item, folders: Mapping[int, Path]) -> str:
+    """Quelle relativ zum Eingangs- bzw. Bibliotheksordner des Vorschlags, sonst nur der Dateiname."""
+    source = Path(item.source)
+    folder = folders.get(item.folder_id) if item.folder_id is not None else None
+    if folder is not None and source != folder and source.is_relative_to(folder):
+        return str(source.relative_to(folder))
+    return source.name
+
+
 def _display_target(item: Item, roots: Sequence[Path]) -> str | None:
     """Folgen: nur der Dateiname (Serie und Staffel stehen in den Überschriften); Filme: relativ zur Bibliothek."""
     if not item.target:
@@ -135,10 +159,8 @@ def _display_target(item: Item, roots: Sequence[Path]) -> str | None:
     target = Path(item.target)
     if item.kind == MediaKind.EPISODE.value:
         return target.name
-    containing = [root for root in roots if target.is_relative_to(root)]
-    if not containing:
-        return str(target)
-    return str(target.relative_to(max(containing, key=lambda r: len(r.parts))))
+    root = _library_of(target, roots)
+    return str(target) if root is None else str(target.relative_to(root))
 
 
 def blocked_reason(item: Item) -> str | None:
@@ -182,23 +204,19 @@ def _conflict_view(item: Item) -> ConflictView | None:
     )
 
 
-def make_row(item: Item, roots: Sequence[Path], message: str | None = None) -> Row:
+def make_row(item: Item, ctx: RowContext, message: str | None = None) -> Row:
     parsed = item.parsed_json or {}
     return Row(
         item=item,
-        old_name=Path(item.source).name,
-        new_path=_display_target(item, roots),
+        old_name=_display_source(item, ctx.folders),
+        new_path=_display_target(item, ctx.roots),
         badge=CONFIDENCE_BADGES.get(item.confidence or "", "–"),
-        tech=tech_labels(_media_info(item.mediainfo_json), parsed.get("languages") or ()),
+        tech=tech_labels(mediainfo_from_json(item.mediainfo_json), parsed.get("languages") or ()),
         subtitles=_subtitles_text(item.subtitles_json),
         blocked=blocked_reason(item),
         conflict=_conflict_view(item),
         message=message,
     )
-
-
-def _library_roots(s: Session) -> list[Path]:
-    return [Path(p) for p in s.scalars(select(Folder.path).where(Folder.role == "library"))]
 
 
 # --- Gruppieren und Filtern ------------------------------------------------------------------
@@ -250,40 +268,59 @@ def _episode_order(row: Row) -> tuple:
     return (episodes[0] if episodes else 10_000, row.item.source)
 
 
-def group_rows(rows: Sequence[Row], season_label: str) -> tuple[list[SeriesGroup], list[Row]]:
-    """Serien nach Serie → Staffel → Folgen, Filme einzeln (jeweils alphabetisch)."""
-    shows: dict[object, list[Row]] = {}
+def _season_heading(item: Item, season_label: str) -> str:
+    """Name des Staffelordners im Ziel, sonst „<Staffelbezeichnung> <Nummer>“."""
+    if item.target:
+        return Path(item.target).parent.name
+    if item.season is None:
+        return "Ohne Staffelangabe"
+    return f"{season_label} {item.season}"
+
+
+def _show_group(key: tuple, members: Sequence[Row], roots: Sequence[Path], season_label: str) -> SeriesGroup:
+    if key[0] == "dir":  # Serienordner im Ziel
+        show_dir = Path(key[1])
+        library = _library_of(show_dir, roots)
+        group = SeriesGroup(title=show_dir.name, library=library.name if library is not None else None)
+    else:
+        group = SeriesGroup(title=_heading(members[0].item))
+    by_season: dict[str, list[Row]] = {}
+    for row in members:
+        by_season.setdefault(_season_heading(row.item, season_label), []).append(row)
+
+    def season_order(label: str) -> tuple:
+        numbers = [r.item.season for r in by_season[label] if r.item.season is not None]
+        return (min(numbers) if numbers else 10_000, label)
+
+    for label in sorted(by_season, key=season_order):
+        group.seasons.append(SeasonGroup(label, sorted(by_season[label], key=_episode_order)))
+    return group
+
+
+def group_rows(rows: Sequence[Row], roots: Sequence[Path], season_label: str) -> tuple[list[SeriesGroup], list[Row]]:
+    """Serien nach Serie → Staffel → Folgen, Filme einzeln (jeweils alphabetisch).
+
+    Folgen mit Ziel werden nach ihrem Serien- und Staffelordner im Ziel gruppiert, Folgen ohne Ziel nach
+    TMDB-Zuordnung bzw. erkanntem Titel.
+    """
+    shows: dict[tuple, list[Row]] = {}
     movies = []
     for row in rows:
         item = row.item
-        if item.kind == MediaKind.EPISODE.value:
-            key = ("tmdb", item.tmdb_id) if item.tmdb_id is not None else ("group", item.group_key)
-            shows.setdefault(key, []).append(row)
-        else:
+        if item.kind != MediaKind.EPISODE.value:
             movies.append(row)
-    series = []
-    for members in shows.values():
-        by_season: dict[int | None, list[Row]] = {}
-        for row in members:
-            by_season.setdefault(row.item.season, []).append(row)
-        group = SeriesGroup(title=_heading(members[0].item))
-        for season in sorted(by_season, key=lambda n: (n is None, n or 0)):
-            season_rows = sorted(by_season[season], key=_episode_order)
-            group.seasons.append(SeasonGroup(_season_heading(season, season_rows, season_label), season_rows))
-        series.append(group)
-    series.sort(key=lambda g: g.title.casefold())
+            continue
+        if item.target:
+            key = ("dir", str(Path(item.target).parent.parent))
+        elif item.tmdb_id is not None:
+            key = ("tmdb", item.tmdb_id)
+        else:
+            key = ("group", item.group_key)
+        shows.setdefault(key, []).append(row)
+    series = [_show_group(key, members, roots, season_label) for key, members in shows.items()]
+    series.sort(key=lambda g: (g.title.casefold(), g.library or ""))
     movies.sort(key=lambda r: (_heading(r.item).casefold(), r.item.source))
     return series, movies
-
-
-def _season_heading(season: int | None, rows: Sequence[Row], season_label: str) -> str:
-    """Name des Staffelordners im Ziel, sonst „<Staffelbezeichnung> <Nummer>“."""
-    if season is None:
-        return "Ohne Staffelangabe"
-    for row in rows:
-        if row.item.target:
-            return Path(row.item.target).parent.name
-    return f"{season_label} {season}"
 
 
 # --- Antworten ---------------------------------------------------------------------------------
@@ -296,6 +333,27 @@ def _load(s: Session, item_id: int) -> Item:
     return item
 
 
+ITEMS_CHANGED = "items-changed"  # htmx-Ereignis: Zähler der Sammelaktionen neu laden
+
+
+@dataclass(frozen=True)
+class BulkCounts:
+    safe: int  # neue Vorschläge, die „Alle sicheren übernehmen“ bestätigen würde
+    confirmed: int
+
+
+def _bulk_counts(s: Session) -> BulkCounts:
+    statuses = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
+    items = list(s.scalars(select(Item).where(Item.status.in_(statuses))))
+    return BulkCounts(safe=sum(1 for it in items if auto_eligible(it)),
+                      confirmed=sum(1 for it in items if it.status == ItemStatus.CONFIRMED.value))
+
+
+def _changed(response: Response) -> Response:
+    response.headers["HX-Trigger"] = ITEMS_CHANGED
+    return response
+
+
 def _row_response(request: Request, item_id: int, status_code: int = 200, message: str | None = None):
     """htmx: die neu gezeichnete Zeile; sonst zurück zur Prüfliste (mit Meldung bei Fehlern)."""
     if not is_htmx(request):
@@ -303,21 +361,22 @@ def _row_response(request: Request, item_id: int, status_code: int = 200, messag
             return RedirectResponse(f"/review#item-{item_id}", status_code=303)
         return _review_page(request, Filters(), status_code=status_code, notice=message)
     with request.app.state.sf() as s:
-        row = make_row(_load(s, item_id), _library_roots(s), message)
-    return render(request, "_item_row.html", status_code=status_code, row=row)
+        row = make_row(_load(s, item_id), _row_context(request, s), message)
+    return _changed(render(request, "_item_row.html", status_code=status_code, row=row))
 
 
 def _review_page(request: Request, filters: Filters, *, status_code: int = 200, notice: str | None = None):
     settings = request.app.state.services.settings()
     with request.app.state.sf() as s:
-        roots = _library_roots(s)
+        ctx = _row_context(request, s)
         items = s.scalars(select(Item).where(Item.status.in_(_VISIBLE)).order_by(Item.id))
-        rows = [make_row(item, roots) for item in items if filters.matches(item)]
+        rows = [make_row(item, ctx) for item in items if filters.matches(item)]
         job = latest_job(s)
-    series, movies = group_rows(rows, settings.season_label)
+        counts = _bulk_counts(s)
+    series, movies = group_rows(rows, ctx.roots, settings.season_label)
     return render(
         request, "review.html", status_code=status_code, active="/review",
-        series=series, movies=movies, filters=filters, notice=notice, job=job,
+        series=series, movies=movies, filters=filters, notice=notice, job=job, counts=counts,
         confidences=[c.value for c in Confidence], kind_filters=KIND_FILTERS, only_filters=ONLY_FILTERS,
     )
 
@@ -329,6 +388,14 @@ def review(request: Request, confidence: str = "", kind: str = "", only: str = "
     if bestaetigt is not None:
         notice = f"{bestaetigt} sichere Vorschläge bestätigt." if bestaetigt != 1 else "1 sicherer Vorschlag bestätigt."
     return _review_page(request, Filters.of(confidence, kind, only), notice=notice)
+
+
+@router.get("/review/bulk")
+def bulk_actions(request: Request):
+    """Sammelaktionen mit aktuellen Zahlen (htmx lädt sie nach jeder Zeilenänderung neu)."""
+    with request.app.state.sf() as s:
+        counts = _bulk_counts(s)
+    return render(request, "_bulk.html", counts=counts)
 
 
 # --- Bestätigen und Entscheiden ---------------------------------------------------------------
@@ -395,7 +462,7 @@ def ignore(request: Request, item_id: int):
         s.merge(Ignored(path=item.source, size=item.size, created=time.time()))
         s.commit()
     if is_htmx(request):
-        return Response("", status_code=200)  # Zeile verschwindet
+        return _changed(Response("", status_code=200))  # Zeile verschwindet
     return RedirectResponse("/review", status_code=303)
 
 
@@ -408,11 +475,11 @@ def _replan(request: Request, item_id: int, **overrides) -> tuple[int, str | Non
         return 409, BUSY
     try:
         request.app.state.services.replan(item_id, **overrides)
-    except KeyError:
+    except ItemNotFound:
         raise HTTPException(404, "Vorschlag nicht gefunden") from None
     except TmdbError as exc:
         return 502, str(exc)
-    except ValueError as exc:  # Status lässt keine Korrektur zu
+    except NotReplannable as exc:
         return 409, str(exc)
     return 200, None
 
@@ -448,7 +515,7 @@ def _correct_response(request: Request, item_id: int, given: Mapping[str, str] |
                       results: list | None = None, search_error: str | None = None):
     with request.app.state.sf() as s:
         item = _load(s, item_id)
-        row = make_row(item, _library_roots(s))
+        row = make_row(item, _row_context(request, s))
     page = not is_htmx(request)
     return render(
         request, "correct.html" if page else "_correct.html", status_code=status_code,
@@ -506,9 +573,7 @@ def correct(request: Request, item_id: int, form: Form):
         return _correct_response(request, item_id, form, status_code=status_code, error=message)
     if not is_htmx(request):
         return RedirectResponse(f"/review#item-{item_id}", status_code=303)
-    response = _row_response(request, item_id)
-    response.headers["HX-Refresh"] = "true"
-    return response
+    return Response("", status_code=200, headers={"HX-Refresh": "true"})
 
 
 # --- Ausführen ------------------------------------------------------------------------------------

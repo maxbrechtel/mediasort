@@ -39,14 +39,7 @@
   <button type="submit" class="secondary">Filtern</button>
 </form>
 
-<div class="bulk">
-  <form method="post" action="/items/confirm-safe">
-    <button type="submit" class="secondary">Alle sicheren übernehmen</button>
-  </form>
-  <form method="post" action="/execute" hx-post="/execute" hx-target="#current-job" hx-swap="outerHTML">
-    <button type="submit">Ausgewählte ausführen</button>
-  </form>
-</div>
+{% include "_bulk.html" %}
 
 {% include "_job.html" %}
 
@@ -59,7 +52,7 @@
   <h2>Serien</h2>
   {% for show in series %}
   <div class="card">
-    <h3>{{ show.title }}</h3>
+    <h3>{{ show.title }}{% if show.library %} <small class="muted">in {{ show.library }}</small>{% endif %}</h3>
     {% for season in show.seasons %}
     <h4>{{ season.label }}</h4>
     {{ item_table(season.rows) }}

@@ -50,7 +50,10 @@
   <tr class="item-detail">
     <td colspan="5">
       {% if row.message %}<p class="notice">{{ row.message }}</p>{% endif %}
-      {% if it.error %}<p class="error">{{ it.error }}</p>{% endif %}
+      {% if it.error %}
+        {% if it.status == "error" %}<p class="error">{{ it.error }}</p>
+        {% else %}<p class="notice">Hinweis: {{ it.error }}</p>{% endif %}
+      {% endif %}
       {% if it.note %}<p class="muted">Hinweis: {{ it.note }}</p>{% endif %}
       {% if row.conflict %}{% include "_conflict.html" %}{% endif %}
       <div id="correct-{{ it.id }}"></div>
