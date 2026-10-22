@@ -22,10 +22,11 @@ Erfolgskriterien:
 
 - **Speicher:** UniFi UNAS, btrfs. Alle Medien liegen in einer Freigabe `Medien`
   mit den Ordnern `Downloads`, `Filme_2D`, `Filme_3D`, `Serien`.
-- **Plex:** eigene VM auf Proxmox VE, bindet `Medien` per SMB ein.
+- **Plex:** eigene VM auf Proxmox VE. Sieht die Bibliotheken unter `/media/Filme_2D`,
+  `/media/Serien` usw., also die Freigabe `Medien` eingebunden unter `/media`.
 - **mediasort:** eigene kleine VM auf Proxmox VE (Debian, Docker). Bindet `Medien`
-  per SMB unter demselben Pfad ein wie die Plex-VM. Damit sind die Pfade in
-  beiden VMs identisch.
+  per SMB ebenfalls unter `/media` ein und reicht `/media` unverändert in den
+  Container durch. Damit sind die Pfade in Plex und mediasort identisch.
 - **Backup:** beide VMs per PBS.
 
 Weil alles in einer Freigabe liegt, ist jedes Verschieben eine Umbenennung auf
@@ -365,10 +366,10 @@ SQLite in `/config/mediasort.db`.
 ## 11. Installation
 
 - **VM:** Debian, 2 vCPU, 2 GB RAM, 16 GB Disk, Docker mit Compose-Plugin.
-- **Mount:** `Medien` per CIFS über `/etc/fstab`, derselbe Pfad wie in der Plex-VM,
+- **Mount:** `Medien` per CIFS über `/etc/fstab` nach `/media` (wie in der Plex-VM),
   mit `credentials=`, `uid`, `gid`, `file_mode=0660`, `dir_mode=0770`,
   `vers=3.1.1`, `_netdev`, `nofail`.
-- **docker-compose.yml:** Medien-Mount unter gleichem Pfad, `./config:/config`,
+- **docker-compose.yml:** `/media:/media`, `./config:/config`,
   `PUID`, `PGID`, `TZ=Europe/Berlin`, Port 8080.
 - **Image:** Python 3.12 slim mit ffmpeg. Der Prozess läuft als `PUID:PGID`.
   Rechte werden nicht gesetzt (SMB erlaubt kein chown).
@@ -409,5 +410,4 @@ SQLite in `/config/mediasort.db`.
 
 ## 14. Offene Punkte
 
-- Mount-Pfad von `Medien` in der Plex-VM (wird für die mediasort-VM übernommen).
-- GitHub-Repository muss vom Nutzer angelegt werden.
+Keine.
