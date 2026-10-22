@@ -36,7 +36,7 @@ dem UNAS und sofort fertig.
 
 | Thema | Entscheidung |
 |---|---|
-| Bedienung | Weboberfläche, Docker, manuell mit Prüfliste |
+| Bedienung | Weboberfläche, Docker, manuell mit Prüfliste; optional automatische Ordnerüberwachung pro Eingangsordner |
 | Datenquelle | TMDB (IMDb-IDs werden über TMDB aufgelöst) |
 | Sprache | einstellbar, Standard Deutsch, Rückfall Englisch |
 | Dateiaktion | Verschieben |
@@ -79,6 +79,7 @@ Jeder Baustein ist ein Modul mit klarer Schnittstelle und eigenen Tests.
 | `planner` | Erzeugt pro Video einen Vorschlag samt Konflikten | alle oben |
 | `executor` | Führt bestätigte Vorschläge aus, räumt auf, protokolliert | Dateisystem, `db` |
 | `plex` | Liest Bibliotheken und Einstellungen, stößt Teilscans an | httpx |
+| `watcher` | Fragt Eingangsordner regelmäßig ab, stößt Scans und automatische Aufträge an | `planner`, `executor` |
 | `db` | Datenmodell und Zugriff | SQLAlchemy |
 | `web` | Routen, Templates, HTMX-Fragmente | alle |
 
@@ -314,12 +315,41 @@ Fehler betreffen nur den einzelnen Vorschlag, der Auftrag läuft weiter.
 - Vor dem ersten Lauf muss eine Warnung bestätigt werden, falls Plex den
   Papierkorb automatisch leert.
 
+### 7.6 Automatische Ordnerüberwachung
+
+Standardmäßig aus. Wird pro Eingangsordner eingeschaltet, wenn sich mediasort im
+manuellen Betrieb bewährt hat.
+
+- **Abfrage statt inotify:** inotify meldet auf SMB-Einbindungen keine Änderungen,
+  die andere Rechner (z. B. das Download-Programm) direkt auf dem UNAS machen.
+  mediasort sieht deshalb regelmäßig nach, standardmäßig alle 15 Minuten
+  (einstellbar). Untersucht werden nur neue oder geänderte Dateien.
+- **Stufen pro Eingangsordner:**
+  - **Aus** (Standard): nur manuell über „Scannen“.
+  - **Nur erkennen:** neue Dateien werden automatisch gescannt und landen in der
+    Prüfliste. Ausgeführt wird erst nach Bestätigung.
+  - **Automatisch einsortieren:** Vorschläge, die alle Bedingungen unten
+    erfüllen, werden direkt ausgeführt. Alle anderen landen in der Prüfliste.
+- **Hauptschalter** in den Einstellungen hält die Automatik überall an.
+- **Automatisch ausgeführt wird nur, wenn alles zutrifft:**
+  - Sicherheit hoch,
+  - kein Konflikt, keine Dublette,
+  - kein Fehler beim Auslesen,
+  - die Datei ist stabil: mindestens so alt wie das Mindestalter (10 Minuten) und
+    Größe sowie Änderungszeit seit der letzten Abfrage unverändert.
+- **Nie automatisch:** Konflikte und Dubletten sowie der Modus „Bibliothek prüfen“.
+- Plex-Teilscan und Aufräumen laufen wie bei manuellen Aufträgen.
+- Automatische Aktionen sind im Verlauf als „automatisch“ markiert. Die Übersicht
+  zeigt den Zeitpunkt der letzten Abfrage und deren Ergebnis.
+- Ein Abfragezyklus wird übersprungen, solange ein anderer Scan oder Auftrag läuft.
+
 ## 8. Weboberfläche
 
 Server-gerenderte Seiten (Jinja2) mit HTMX, responsiv, ohne Login.
 
-- **Übersicht:** Eingangsordner mit Anzahl neuer Dateien und „Scannen“, laufender
-  Auftrag mit Fortschritt, letzte Aktionen, Warnungen.
+- **Übersicht:** Eingangsordner mit Anzahl neuer Dateien, Automatik-Stufe und
+  „Scannen“, letzte automatische Abfrage, laufender Auftrag mit Fortschritt,
+  letzte Aktionen, Warnungen.
 - **Prüfliste:** Serien gruppiert nach Serie → Staffel → Folgen, Filme einzeln.
   Pro Zeile alter Name → neuer Pfad, Sicherheit, technische Angaben,
   Konflikt/Fehler. Aktionen: Haken, Korrigieren (TMDB-Suche, TMDB-/IMDb-ID oder
@@ -327,10 +357,12 @@ Server-gerenderte Seiten (Jinja2) mit HTMX, responsiv, ohne Login.
   Konflikt, Fehler. Sammelaktionen „Alle sicheren übernehmen“ und
   „Ausgewählte ausführen“. Konflikte zeigen beide Versionen nebeneinander.
 - **Bibliothek prüfen:** Bibliothek und Ausschnitt wählen, Scan starten.
-- **Verlauf:** durchsuchbares Protokoll (Zeit, Aktion, alter Pfad, neuer Pfad).
+- **Verlauf:** durchsuchbares Protokoll (Zeit, Aktion, alter Pfad, neuer Pfad,
+  manuell/automatisch).
 - **Ignoriert:** Liste der ignorierten Dateien, Ignorieren aufheben.
 - **Einstellungen:** TMDB-Schlüssel und Sprache; Ordnerliste (Pfad, Rolle
-  Eingang/Bibliothek, Typ, Ziel); Staffelbezeichnung; Sample-Grenze;
+  Eingang/Bibliothek, Typ, Ziel, Automatik-Stufe); Hauptschalter und
+  Abfrageintervall der Automatik; Staffelbezeichnung; Sample-Grenze;
   Ausschlussliste; Mindestalter neuer Dateien; Plex (Adresse, Token,
   Pfadzuordnung).
 
@@ -356,22 +388,23 @@ SQLite in `/config/mediasort.db`.
 | Tabelle | Inhalt |
 |---|---|
 | `settings` | Schlüssel/Wert |
-| `folders` | Pfad, Rolle, Typ, Ziel-Ordner |
+| `folders` | Pfad, Rolle, Typ, Ziel-Ordner, Automatik-Stufe |
 | `scans` | Zeitpunkt, Ordner, Ausschnitt, Status |
 | `items` | Vorschlag: Quelle, Größe, Änderungszeit, Parse-Ergebnis, TMDB-ID, Staffel, Folgen, Sicherheit, Mediainfo, Ziel, Untertitel, Konflikt, Entscheidung, Status, Fehlertext |
 | `ignored` | Pfad, Größe, Zeitpunkt |
 | `library_index` | Bibliothek, Ordnerpfad, Titel, Jahr, TMDB-ID, Typ |
-| `history` | Zeitpunkt, Auftrag, Aktion (verschoben/gelöscht/Ordner gelöscht), alter Pfad, neuer Pfad |
+| `history` | Zeitpunkt, Auftrag, Aktion (verschoben/gelöscht/Ordner gelöscht), alter Pfad, neuer Pfad, automatisch ja/nein |
 | `tmdb_cache` | Anfrage-Schlüssel, Antwort, Zeitpunkt |
-| `jobs` | Art, Status, Fortschritt, Start, Ende |
+| `jobs` | Art, Status, Fortschritt, Start, Ende, automatisch ja/nein |
+| `file_state` | Pfad, Größe, Änderungszeit, zuletzt gesehen (für die Stabilitätsprüfung der Automatik) |
 
 ## 11. Installation
 
 - **VM:** Debian, 2 vCPU, 2 GB RAM, 16 GB Disk, Docker mit Compose-Plugin.
 - **Mount:** `Medien` als **eine** CIFS-Einbindung über `/etc/fstab` nach `/media`.
   Getrennte Einbindungen einzelner Unterordner würden jedes Verschieben zwischen
-  ihnen zu einer Kopie übers Netz machen. Optionen: `credentials=`, `uid`, `gid`, `file_mode=0660`, `dir_mode=0770`,
-  `vers=3.1.1`, `_netdev`, `nofail`.
+  ihnen zu einer Kopie übers Netz machen. Optionen: `credentials=`, `uid`, `gid`,
+  `file_mode=0660`, `dir_mode=0770`, `vers=3.1.1`, `_netdev`, `nofail`.
 - **docker-compose.yml:** `/media:/media`, `./config:/config`,
   `PUID`, `PGID`, `TZ=Europe/Berlin`, Port 8080.
 - **Image:** Python 3.12 slim mit ffmpeg. Der Prozess läuft als `PUID:PGID`.
@@ -395,6 +428,8 @@ SQLite in `/config/mediasort.db`.
 - **tmdb, matcher, plex:** aufgezeichnete Antworten als Fixtures.
 - **executor:** temporäre Ordner. Verschieben, simuliertes `EXDEV`, Abbruch beim
   Kopieren, Schutzregel, Konflikte, nie überschreiben, geänderte Quelle.
+- **watcher:** Stabilitätsprüfung, Bedingungen für automatisches Ausführen,
+  Hauptschalter, Überspringen bei laufendem Auftrag (mit simulierter Uhr).
 - **web:** FastAPI-TestClient für die wichtigsten Abläufe (Scan → Prüfliste →
   Bestätigen → Ausführen).
 - **Abnahme:** Auf dem UNAS wird per `cp -a --reflink=always` eine Kopie von
@@ -403,12 +438,12 @@ SQLite in `/config/mediasort.db`.
 
 ## 13. Nicht im Umfang
 
-- Automatische Ordnerüberwachung und automatisches Ausführen
 - Rückgängig-Funktion (das Protokoll enthält alle alten Pfade)
 - Absolute Folgennummerierung (Anime)
 - Disc-Strukturen (BDMV, VIDEO_TS)
 - NFO- und Bild-Erzeugung
 - Login und Benutzerverwaltung
+- Benachrichtigungen (Mail, Push)
 - Andere Datenquellen als TMDB
 
 ## 14. Offene Punkte
