@@ -1,0 +1,10 @@
+{
+  "MediaContainer": {
+    "size": 3,
+    "Setting": [
+      {"id": "FriendlyName", "label": "Friendly name", "type": "text", "default": "", "value": "plex-vm", "hidden": false},
+      {"id": "autoEmptyTrash", "label": "Empty trash automatically after every scan", "type": "bool", "default": true, "value": true, "hidden": false},
+      {"id": "ScanMyLibraryAutomatically", "label": "Scan my library automatically", "type": "bool", "default": true, "value": false, "hidden": false}
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "MediaContainer": {
+    "size": 2,
+    "allowSync": false,
+    "title1": "Plex Library",
+    "Directory": [
+      {
+        "key": "1",
+        "title": "Filme",
+        "type": "movie",
+        "agent": "tv.plex.agents.movie",
+        "language": "de-DE",
+        "Location": [{"id": 1, "path": "/media/Filme_2D"}]
+      },
+      {
+        "key": "2",
+        "title": "Serien",
+        "type": "show",
+        "agent": "tv.plex.agents.series",
+        "language": "de-DE",
+        "Location": [{"id": 2, "path": "/media/Serien"}]
+      }
+    ]
+  }
+}
