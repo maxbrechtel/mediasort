@@ -104,7 +104,8 @@ Scannen → parser → matcher (tmdb) → mediainfo → namer → planner (+ lib
   - Dateien, die in den letzten 10 Minuten geändert wurden
   - Dateien auf der Ignorierliste
 - **Sample:** Video unter 100 MB oder mit `sample` im Namen. Samples erzeugen keinen
-  Vorschlag. Kleine Videos ohne `sample` im Namen erscheinen als Hinweis zum Scan.
+  Vorschlag. Kleine Videos ohne `sample` im Namen erscheinen als Hinweis zum Scan –
+  erst ab dem Mindestalter und nur einmal, solange Größe und Änderungszeit gleich bleiben.
   Gelöscht wird beim Aufräumen nur, was nach Name ein Sample ist (siehe 7.4).
 - **Untertitel zuordnen:** Ein Untertitel gehört zu einem Video, wenn er im selben
   Ordner oder in einem Unterordner `Subs`/`Subtitles` liegt und

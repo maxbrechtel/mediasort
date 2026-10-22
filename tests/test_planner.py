@@ -539,6 +539,25 @@ def test_small_video_is_reported_in_scan_errors(env):
     assert scan.errors_json == [f"Kleine Videodatei übersprungen (unter Sample-Grenze): {small}"]
 
 
+def test_small_video_hint_is_not_repeated_for_unchanged_file(env):
+    # Abschlussprüfung R4: jede Abfrage des Watchers würde sonst denselben Hinweis wiederholen
+    env.settings.sample_bytes = 100
+    small = env.file("Downloads/Show.S01/Show.S01E05.mkv", content=b"x" * 50)
+    hint = f"Kleine Videodatei übersprungen (unter Sample-Grenze): {small}"
+
+    def errors():
+        with env.sm() as s:
+            return s.get(Scan, env.plan("Downloads").scan_id).errors_json
+
+    assert errors() == [hint]
+    assert errors() == []
+    small.write_bytes(b"x" * 60)  # verändert: wieder melden
+    assert errors() == [hint]
+    assert errors() == []
+    other = env.file("Downloads/Show.S01/Show.S01E06.mkv", content=b"x" * 40)
+    assert errors() == [f"Kleine Videodatei übersprungen (unter Sample-Grenze): {other}"]
+
+
 # --- Abschlussprüfung C2: „Neue behalten“ löscht nur echte Dubletten ---------------------
 
 SMALL_INFO = MI(1280, 720, "h264", None, [A("ac3", "de", 2)])

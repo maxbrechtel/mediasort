@@ -160,13 +160,18 @@ def scan(
             except OSError:
                 result.errors.append(f"Datei nicht lesbar: {path}")
                 continue
+            too_new = now - st.st_mtime < min_age_s
             if is_sample_name(name) or st.st_size < sample_bytes:
+                # ein kleines Video, das gerade noch geschrieben wird, ist nur „zu neu“ (Abschlussprüfung R4)
                 if str(path) not in ignored:
-                    (result.samples if is_sample_name(name) else result.small).append(path)
+                    if is_sample_name(name):
+                        result.samples.append(path)
+                    else:
+                        (result.too_new if too_new else result.small).append(path)
                 continue
             if str(path) in ignored:
                 local.append((path, st.st_size, -1.0))  # zählt nur für die Untertitelzuordnung
-            elif now - st.st_mtime < min_age_s:
+            elif too_new:
                 result.too_new.append(path)
                 local.append((path, st.st_size, -1.0))
             else:

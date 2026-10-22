@@ -85,6 +85,22 @@ def test_small_videos_are_reported_but_not_proposed(tmp_path, mk):
     assert r.small == [tmp_path / "S/Show.S01E05.mkv"] and r.samples == []
 
 
+def test_small_video_still_being_written_is_only_too_new(tmp_path, mk):
+    # Abschlussprüfung R4: ein Download, der gerade erst begonnen hat, ist (noch) klein
+    mk("D/Film.2020.mkv", 50 * MB, age_s=60)
+    mk("D/Film.2020.sample.mkv", 50 * MB, age_s=60)
+    mk("E/Show.S01E01.mkv", GB)
+    mk("E/Show.S01E02.mkv", 50 * MB, age_s=60)
+    mk("E/Show.S01E01.de.srt", 1)
+    r = scan(tmp_path, **DEFAULTS)
+    assert r.small == []
+    assert [p.name for p in r.too_new] == ["Film.2020.mkv", "Show.S01E02.mkv"]
+    assert [p.name for p in r.samples] == ["Film.2020.sample.mkv"]
+    # der junge kleine Download zählt nicht als zweites Video des Ordners
+    [video] = r.videos
+    assert [s.path.name for s in video.subtitles] == ["Show.S01E01.de.srt"]
+
+
 def test_video_like_and_partial_extension_sets():
     from mediasort.scanner import PARTIAL_EXT, VIDEO_LIKE_EXT, is_partial_name
 

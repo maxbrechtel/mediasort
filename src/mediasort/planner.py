@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from mediasort.db import Folder, Ignored, Item, Scan, casefold
+from mediasort.db import FileState, Folder, Ignored, Item, Scan, casefold
 from mediasort.library import LibraryIndex, LibraryUnreadable, ShowVideo, movie_versions, show_videos
 from mediasort.matcher import match
 from mediasort.mediainfo import ProbeError
@@ -573,6 +573,26 @@ def _already_planned(
     return last == (ItemStatus.ERROR.value, video.size, video.mtime)
 
 
+def _unreported_small(s: Session, paths: Sequence[Path], now: float) -> list[Path]:
+    """Kleine Videos, zu denen noch kein Hinweis kam (Abschlussprüfung R4).
+
+    ``FileState`` merkt sich Größe und Änderungszeit jeder gemeldeten Datei; solange beide gleich
+    bleiben, wiederholt kein weiterer Scan (etwa jede Abfrage des Watchers) denselben Hinweis.
+    """
+    known = {st.path: (st.size, st.mtime)
+             for st in s.scalars(select(FileState).where(FileState.path.in_([str(p) for p in paths])))}
+    fresh = []
+    for path in paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue  # inzwischen verschwunden
+        if known.get(str(path)) != (st.st_size, st.st_mtime):
+            fresh.append(path)
+        s.merge(FileState(path=str(path), size=st.st_size, mtime=st.st_mtime, last_seen=now))
+    return fresh
+
+
 def plan_folder(
     ctx: PlanContext,
     folder: Folder,
@@ -658,7 +678,8 @@ def plan_folder(
         s.add_all(items)
         row = s.get(Scan, scan_id)
         row.status, row.finished = "done", ctx.now()
-        row.errors_json = list(result.errors) + [SMALL_VIDEO_HINT.format(p) for p in result.small]
+        row.errors_json = list(result.errors) + [
+            SMALL_VIDEO_HINT.format(p) for p in _unreported_small(s, result.small, ctx.now())]
         s.commit()
     return scan_id
 
