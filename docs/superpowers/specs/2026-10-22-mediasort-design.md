@@ -22,8 +22,8 @@ Erfolgskriterien:
 
 - **Speicher:** UniFi UNAS, btrfs. Alle Medien liegen in einer Freigabe `Medien`
   mit den Ordnern `Downloads`, `Filme_2D`, `Filme_3D`, `Serien`.
-- **Plex:** eigene VM auf Proxmox VE. Sieht die Bibliotheken unter `/media/Filme_2D`,
-  `/media/Serien` usw., also die Freigabe `Medien` eingebunden unter `/media`.
+- **Plex:** eigene VM auf Proxmox VE mit den Bibliotheken `/media/Filme_2D` und
+  `/media/Serien`. `Filme_3D` ist bewusst nicht in Plex eingebunden.
 - **mediasort:** eigene kleine VM auf Proxmox VE (Debian, Docker). Bindet `Medien`
   per SMB ebenfalls unter `/media` ein und reicht `/media` unverändert in den
   Container durch. Damit sind die Pfade in Plex und mediasort identisch.
@@ -344,6 +344,8 @@ Server-gerenderte Seiten (Jinja2) mit HTMX, responsiv, ohne Login.
 - Nach jedem Auftrag: `GET /library/sections/{id}/refresh?path=<Ordner>` für jeden
   betroffenen Ordner (Ziel, alter Ort, Ort gelöschter Dubletten), zusammengefasst
   auf die übergeordneten Titelordner.
+- Ordner, die zu keiner Plex-Bibliothek gehören (z. B. `Filme_3D`, `Downloads`),
+  werden ohne Hinweis übersprungen.
 - Ist Plex nicht erreichbar, gibt es einen Hinweis. Der Auftrag gilt trotzdem als
   erfolgreich.
 
@@ -366,8 +368,9 @@ SQLite in `/config/mediasort.db`.
 ## 11. Installation
 
 - **VM:** Debian, 2 vCPU, 2 GB RAM, 16 GB Disk, Docker mit Compose-Plugin.
-- **Mount:** `Medien` per CIFS über `/etc/fstab` nach `/media` (wie in der Plex-VM),
-  mit `credentials=`, `uid`, `gid`, `file_mode=0660`, `dir_mode=0770`,
+- **Mount:** `Medien` als **eine** CIFS-Einbindung über `/etc/fstab` nach `/media`.
+  Getrennte Einbindungen einzelner Unterordner würden jedes Verschieben zwischen
+  ihnen zu einer Kopie übers Netz machen. Optionen: `credentials=`, `uid`, `gid`, `file_mode=0660`, `dir_mode=0770`,
   `vers=3.1.1`, `_netdev`, `nofail`.
 - **docker-compose.yml:** `/media:/media`, `./config:/config`,
   `PUID`, `PGID`, `TZ=Europe/Berlin`, Port 8080.
