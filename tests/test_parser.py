@@ -71,6 +71,45 @@ def test_parse_name(filename, parent, kind, title, year, season, episodes, langu
     assert parsed.is_sample is is_sample
 
 
+def test_parent_fills_season_and_episodes_for_garbage_title():
+    parsed = parse_name("y2x24go2wrcp.mkv", "Show.S02E03.German.DL.1080p-GRP")
+    assert parsed.kind == E
+    assert (parsed.title, parsed.season, parsed.episodes) == ("Show", 2, (3,))
+    assert parsed.languages == ("de", "en")
+
+
+def test_file_season_wins_over_parent():
+    parsed = parse_name("y2x24go2wrcp.S01E01.mkv", "Show.S02E03.German")
+    assert (parsed.season, parsed.episodes) == (1, (1,))
+
+
+def test_parent_fills_3d_for_garbage_title():
+    parsed = parse_name("y2x24go2wrcp.mkv", "Avatar.2009.3D.HSBS.1080p")
+    assert parsed.kind == M
+    assert (parsed.title, parsed.year) == ("Avatar", 2009)
+    assert parsed.is_3d is True
+    assert parsed.format_3d == "HSBS"
+
+
+def test_parent_season_fills_missing_file_season_before_default():
+    parsed = parse_name("Show.E05.mkv", "Show.S02.German")
+    assert (parsed.title, parsed.season, parsed.episodes) == ("Show", 2, (5,))
+
+
+def test_episode_without_season_defaults_to_one():
+    parsed = parse_name("Show.E05.mkv", "Unrelated.Thing.S02")
+    assert (parsed.season, parsed.episodes) == (1, (5,))
+
+
+def test_format_3d_case_insensitive():
+    assert parse_name("Movie.2012.3D.tab.mkv").format_3d == "TAB"
+
+
+def test_sample_needs_whole_word():
+    assert parse_name("Movie.Samplers.2012.mkv").is_sample is False
+    assert parse_name("Movie.2012.Sample.mkv").is_sample is True
+
+
 def test_normalize_german():
     assert normalize_german("Serie Staffel 3 Folge 1") == "Serie S03E01"
     assert normalize_german("Serie.Staffel3.Folge1") == "Serie.S03E01"
