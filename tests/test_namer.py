@@ -6,6 +6,8 @@ from conftest import MI, A
 from mediasort.models import Subtitle
 from mediasort.namer import (
     MAX_NAME_BYTES,
+    MAX_VIDEO_NAME_BYTES,
+    SUBTITLE_RESERVE,
     episode_relpath,
     movie_relpath,
     sanitize,
@@ -91,30 +93,33 @@ def test_episode_no_languages():
 
 def test_long_names_fit_255_bytes():
     p = episode_relpath("Serie", 2020, 1, [1], ["ä" * 300], "mkv", MI(1920, 1080, "h264", None, []))
-    assert len(p.name.encode()) <= 255 and p.name.endswith(" - 1080p.mkv")
+    assert len(p.name.encode()) <= MAX_VIDEO_NAME_BYTES and p.name.endswith(" - 1080p.mkv")
 
 
 def test_long_episode_title_cut_keeps_show_and_whole_chars():
     info = MI(1920, 1080, "h264", None, [A("ac3", "de", 2)])
     p = episode_relpath("Serie", 2020, 1, [1], ["日本語" * 100], "mkv", info)
-    assert len(p.name.encode()) <= MAX_NAME_BYTES
+    assert len(p.name.encode()) <= MAX_VIDEO_NAME_BYTES
     assert p.name.startswith("Serie - S01E01 - 日本語") and p.name.endswith(" - 1080p [DE].mkv")
     assert p.name.encode().decode("utf-8")  # gültiges UTF-8
-    assert len(p.name.encode()) > 255 - 3  # so wenig wie nötig gekürzt
+    assert len(p.name.encode()) > MAX_VIDEO_NAME_BYTES - 3  # so wenig wie nötig gekürzt
 
 
 def test_long_show_title_cut_after_episode_title():
     info = MI(1920, 1080, "h264", None, [])
     p = episode_relpath("S" * 300, 2020, 1, [1], ["Folge"], "mkv", info)
-    assert len(p.name.encode()) <= 255
+    assert len(p.name.encode()) <= MAX_VIDEO_NAME_BYTES
     assert len(p.parts[0].encode()) <= 255 and len(p.parts[1].encode()) <= 255
     assert p.name.endswith(" - S01E01 - 1080p.mkv")
+    assert "Folge" not in p.name  # Folgenname zuerst geopfert
+    show_part = p.name.split(" - S01E01")[0]
+    assert set(show_part) == {"S"} and 0 < len(show_part) < 300  # Serientitel gekürzt
 
 
 def test_long_movie_title_cut():
     info = MI(1920, 1080, "h264", None, [A("dts", "de", 6)])
     p = movie_relpath("ö" * 300, 2020, "mkv", info)
-    assert len(p.name.encode()) <= 255 and len(p.parent.name.encode()) <= 255
+    assert len(p.name.encode()) <= MAX_VIDEO_NAME_BYTES and len(p.parent.name.encode()) <= 255
     assert p.name.endswith(" (2020) 1080p h264 DTS [DE].mkv")
 
 
@@ -147,3 +152,27 @@ def test_subtitle_targets_second_idx_sub_pair_and_parent():
     assert [t.name for _, t in result] == ["X (2020).de.idx", "X (2020).de.sub",
                                            "X (2020).de.2.idx", "X (2020).de.2.sub"]
     assert all(t.parent == v.parent for _, t in result)
+
+
+def test_subtitle_names_of_truncated_videos_fit_255_bytes():
+    info = MI(1920, 1080, "h264", None, [A("ac3", "de", 2)])
+    subs = [Subtitle(Path("/in/a.srt"), "de", True), Subtitle(Path("/in/b.srt"), "de", True),
+            Subtitle(Path("/in/c.idx"), "en", True), Subtitle(Path("/in/c.sub"), "en", True)]
+    videos = [
+        episode_relpath("Serie", 2020, 1, [1], ["ä" * 300], "mkv", info),
+        episode_relpath("S" * 300, 2020, 1, [1], ["x"], "mkv", info),
+        movie_relpath("ö" * 300, 2020, "mkv", info),
+    ]
+    for rel in videos:
+        video = Path("/lib") / rel
+        stem = video.name[: -len(".mkv")]
+        assert len(video.name.encode()) <= MAX_NAME_BYTES - SUBTITLE_RESERVE
+        targets = subtitle_targets(video, subs)
+        assert targets[1][1].name == stem + ".de.forced.2.srt"
+        for _, target in targets:
+            assert len(target.name.encode()) <= MAX_NAME_BYTES
+            assert target.name.startswith(stem)
+
+
+def test_season_label_is_sanitized():
+    assert episode_relpath("X", 2020, 1, [1], [], "mkv", None, season_label="Sea/son:").parent.name == "Sea-son - 1"

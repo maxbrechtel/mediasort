@@ -15,6 +15,9 @@ from mediasort.quality import (
 )
 
 MAX_NAME_BYTES = 255
+# Platz für Untertitel-Zusätze (".de.forced.2.srt"), damit deren Namen ebenfalls <= 255 Bytes bleiben.
+SUBTITLE_RESERVE = 20
+MAX_VIDEO_NAME_BYTES = MAX_NAME_BYTES - SUBTITLE_RESERVE
 
 _REMOVED = re.compile(r'[?*"<>|]')
 _SPACES = re.compile(r"\s+")
@@ -58,7 +61,8 @@ def _year_part(year: int | None) -> str:
 def _stem_with_title(title: str, year: int | None, tail: str, ext: str) -> str:
     """Dateiname ``<Titel>[ (Jahr)]<tail>.<ext>``; der Titel wird gekürzt, bis alles passt."""
     suffix = f"{_year_part(year)}{tail}.{ext}"
-    title = _cut(title, MAX_NAME_BYTES - _size(suffix)) if _size(title) + _size(suffix) > MAX_NAME_BYTES else title
+    if _size(title) + _size(suffix) > MAX_VIDEO_NAME_BYTES:
+        title = _cut(title, MAX_VIDEO_NAME_BYTES - _size(suffix))
     return f"{title}{suffix}"
 
 
@@ -138,17 +142,17 @@ def episode_relpath(
         return f"{show_part} - {numbers}{middle}{tail}.{ext}"
 
     name = build(show, ep_title)
-    if _size(name) > MAX_NAME_BYTES:
+    if _size(name) > MAX_VIDEO_NAME_BYTES:
         # 1. Folgenname kürzen (soweit er neben Serie, Nummer und Rest Platz hat)
-        room = MAX_NAME_BYTES - _size(build(show, "")) - _size(" - ")
+        room = MAX_VIDEO_NAME_BYTES - _size(build(show, "")) - _size(" - ")
         ep_title = _cut(ep_title, room)
         name = build(show, ep_title)
-    if _size(name) > MAX_NAME_BYTES:
+    if _size(name) > MAX_VIDEO_NAME_BYTES:
         # 2. Serientitel im Dateinamen kürzen
-        room = MAX_NAME_BYTES - _size(build("", ep_title))
+        room = MAX_VIDEO_NAME_BYTES - _size(build("", ep_title))
         name = build(_cut(show, room), ep_title)
 
-    season_dir = f"{season_label} {season}"
+    season_dir = f"{sanitize(season_label)} {season}"
     return PurePosixPath(_folder_name(show, year)) / season_dir / name
 
 
