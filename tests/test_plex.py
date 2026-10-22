@@ -253,3 +253,66 @@ def test_sections_failure_gives_single_hint(seen):
     )
     assert msgs == ["Plex-Fehler: HTTP 401"]
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"MediaContainer": {"Directory": [{"title": "X", "type": "movie"}]}},
+        {"MediaContainer": {"Directory": [{"key": "1", "Location": [{"id": 1}]}]}},
+        {"MediaContainer": {"Directory": ["x"]}},
+        {"MediaContainer": {"Directory": 5}},
+    ],
+)
+def test_malformed_sections_raise_plex_error(body):
+    with pytest.raises(PlexError, match="unerwartete Antwort"):
+        client_with(lambda r: httpx.Response(200, json=body)).sections()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"MediaContainer": {"Setting": ["x"]}},
+        {"MediaContainer": {"Setting": 5}},
+    ],
+)
+def test_malformed_prefs_raise_plex_error(body):
+    with pytest.raises(PlexError, match="unerwartete Antwort"):
+        client_with(lambda r: httpx.Response(200, json=body)).auto_empty_trash()
+
+
+def test_refresh_touched_malformed_sections_gives_one_hint():
+    body = {"MediaContainer": {"Directory": [{"title": "no key"}]}}
+    msgs = refresh_touched(
+        client_with(lambda r: httpx.Response(200, json=body)),
+        [Path("/media/Filme_2D/A")],
+        [],
+        [Path("/media/Filme_2D")],
+    )
+    assert msgs == ["Plex-Fehler: unerwartete Antwort"]
+
+
+def test_empty_exception_message_falls_back_to_class_name():
+    def handler(request):
+        raise httpx.ReadTimeout("")
+
+    with pytest.raises(PlexError) as info:
+        client_with(handler).sections()
+    assert str(info.value) == "Plex nicht erreichbar: ReadTimeout"
+
+
+def test_unreachable_stops_further_refreshes(seen):
+    def handler(request):
+        seen.append(request)
+        if request.url.path == "/library/sections":
+            return httpx.Response(200, json=fixture("sections.json"))
+        raise httpx.ConnectError("refused")
+
+    msgs = refresh_touched(
+        client_with(handler),
+        [Path("/media/Filme_2D/A"), Path("/media/Filme_2D/B")],
+        [],
+        [Path("/media/Filme_2D")],
+    )
+    assert len(msgs) == 1 and msgs[0].startswith("Plex nicht erreichbar: ")
+    assert [r.url.path for r in seen] == ["/library/sections", "/library/sections/1/refresh"]

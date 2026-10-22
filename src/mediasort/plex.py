@@ -8,6 +8,8 @@ from typing import Any
 import httpx
 
 TIMEOUT_S = 10.0
+UNEXPECTED_RESPONSE = "Plex-Fehler: unerwartete Antwort"
+UNREACHABLE_PREFIX = "Plex nicht erreichbar: "
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,7 @@ class PlexClient:
             with httpx.Client(transport=self._transport, timeout=TIMEOUT_S) as http:
                 response = http.get(self._base_url + path, params=params, headers=headers)
         except httpx.HTTPError as exc:
-            raise PlexError(f"Plex nicht erreichbar: {exc}") from exc
+            raise PlexError(UNREACHABLE_PREFIX + (str(exc) or type(exc).__name__)) from exc
         if response.is_error:
             raise PlexError(f"Plex-Fehler: HTTP {response.status_code}", response.status_code)
         return response
@@ -50,28 +52,35 @@ class PlexClient:
         try:
             container = self._get(path).json()["MediaContainer"]
         except (ValueError, KeyError, TypeError) as exc:
-            raise PlexError("Plex-Fehler: unerwartete Antwort") from exc
+            raise PlexError(UNEXPECTED_RESPONSE) from exc
         if not isinstance(container, dict):
-            raise PlexError("Plex-Fehler: unerwartete Antwort")
+            raise PlexError(UNEXPECTED_RESPONSE)
         return container
 
     def sections(self) -> list[PlexSection]:
         container = self._container("/library/sections")
-        return [
-            PlexSection(
-                key=str(directory["key"]),
-                title=directory.get("title", ""),
-                type=directory.get("type", ""),
-                locations=tuple(loc["path"] for loc in directory.get("Location", [])),
-            )
-            for directory in container.get("Directory", [])
-        ]
+        try:
+            return [
+                PlexSection(
+                    key=str(directory["key"]),
+                    title=directory.get("title", ""),
+                    type=directory.get("type", ""),
+                    locations=tuple(loc["path"] for loc in directory.get("Location", [])),
+                )
+                for directory in container.get("Directory", [])
+            ]
+        except (KeyError, AttributeError, TypeError) as exc:
+            raise PlexError(UNEXPECTED_RESPONSE) from exc
 
     def auto_empty_trash(self) -> bool:
         """Ist ``autoEmptyTrash`` aktiv? Fehlt die Einstellung, ist die Antwort ``False``."""
-        for setting in self._container("/:/prefs").get("Setting", []):
-            if setting.get("id") == "autoEmptyTrash":
-                return setting.get("value") is True
+        container = self._container("/:/prefs")
+        try:
+            for setting in container.get("Setting", []):
+                if setting.get("id") == "autoEmptyTrash":
+                    return setting.get("value") is True
+        except (AttributeError, TypeError) as exc:
+            raise PlexError(UNEXPECTED_RESPONSE) from exc
         return False
 
     def refresh(self, section_key: str, path: str) -> None:
@@ -160,4 +169,6 @@ def refresh_touched(
         except PlexError as exc:
             if str(exc) not in hints:
                 hints.append(str(exc))
+            if str(exc).startswith(UNREACHABLE_PREFIX):
+                break  # Plex nicht erreichbar: keine weiteren Versuche (sonst N Timeouts)
     return hints
