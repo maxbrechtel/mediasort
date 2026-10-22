@@ -7,8 +7,14 @@ import pytest
 from sqlalchemy import select
 
 from mediasort import executor
-from mediasort.db import Folder, History, Item
-from mediasort.executor import ExecutionReport, cleanup_source, execute, move_file
+from mediasort.db import Folder, History, Item, Scan
+from mediasort.executor import (
+    ExecutionReport,
+    SourceNotRemoved,
+    cleanup_source,
+    execute,
+    move_file,
+)
 from mediasort.settings import Settings
 
 MB = 1024 * 1024
@@ -107,6 +113,23 @@ def test_move_exdev_never_overwrites_foreign_tmp(tmp_path, monkeypatch):
     assert src.read_bytes() == b"video data" and tmp.read_bytes() == b"foreign"
 
 
+def test_move_exdev_unlink_failure_reports_duplicate(tmp_path, monkeypatch):
+    _exdev_once(monkeypatch)
+    src = write(tmp_path / "src.mkv", b"video data")
+    dst = tmp_path / "dst.mkv"
+    real_unlink = os.unlink
+
+    def unlink(path, *a, **kw):
+        if Path(path) == src:
+            raise PermissionError(errno.EACCES, "Keine Berechtigung", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(executor.os, "unlink", unlink)
+    with pytest.raises(SourceNotRemoved):
+        move_file(src, dst)
+    assert dst.read_bytes() == b"video data" and src.read_bytes() == b"video data"
+
+
 # --- cleanup_source ------------------------------------------------------------------
 
 
@@ -181,6 +204,32 @@ def test_cleanup_missing_folder_is_noop(tmp_path):
     assert not cleanup_source(tmp_path / "fehlt", protected=set(), exclude=EXCLUDE, sample_bytes=1)
 
 
+def test_cleanup_sample_dirs_and_sample_suffix_are_leftovers(tmp_path):
+    rel = tmp_path / "Rel"
+    sparse(rel / "Samples" / "rel.mkv", 300 * MB)
+    sparse(rel / "rel-sample.mkv", 300 * MB)
+    sparse(rel / "rel.sample.mkv", 300 * MB)
+    sparse(rel / "rel_Sample.mkv", 300 * MB)
+    sparse(rel / "rel sample.mkv", 300 * MB)
+    assert cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert not rel.exists()
+
+
+def test_cleanup_keeps_big_movie_with_sample_in_title(tmp_path):
+    pack = tmp_path / "Pack"
+    other = sparse(pack / "Sample.People.2000.1080p.mkv", 3000 * MB)
+    assert not cleanup_source(pack, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    assert other.exists()
+
+
+def test_cleanup_video_at_sample_limit_blocks(tmp_path):
+    rel = tmp_path / "Rel"
+    sparse(rel / "m.mkv", 100 * MB)
+    assert not cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+    sparse(rel / "m.mkv", 100 * MB - 1)
+    assert cleanup_source(rel, protected=set(), exclude=EXCLUDE, sample_bytes=100 * MB)
+
+
 # --- execute ---------------------------------------------------------------------------
 
 TARGET_2D = "Filme_2D/M (2020)/M (2020) 1080p h264 AC3 [DE].mkv"
@@ -199,13 +248,14 @@ class Env:
             s.flush()
             s.add(Folder(path=str(root / "Downloads"), role="input", movie_target_id=lib.id,
                          series_target_id=series.id))
+            s.add_all([Scan(id=1, status="done"), Scan(id=2, status="done")])
             s.commit()
 
     def p(self, rel: str) -> Path:
         return self.root / rel
 
     def item(self, source: str, target: str | None, *, subs=(), existing=None, suggestion=None,
-             decision=None, status="confirmed", data: bytes = b"video") -> Item:
+             decision=None, status="confirmed", data: bytes = b"video", scan_id=1) -> Item:
         src = self.p(source)
         if not src.exists():
             write(src, data)
@@ -222,7 +272,7 @@ class Env:
         with self.sf() as s:
             it = Item(source=str(src), size=st.st_size, mtime=st.st_mtime, kind="movie",
                       target=str(self.p(target)) if target else None, subtitles_json=sub_json,
-                      conflict_json=conflict, decision=decision, status=status)
+                      conflict_json=conflict, decision=decision, status=status, scan_id=scan_id)
             s.add(it)
             s.commit()
             return it
@@ -350,7 +400,8 @@ def test_execute_keep_new_replaces_file_at_target(env):
     r = run(env, item)
     assert r.done == 1
     assert env.p(TARGET_2D).read_bytes() == b"video" and env.p(sub_target).read_bytes() == b"sub"
-    assert [h.action for h in env.history()] == ["deleted", "deleted", "moved", "moved", "folder_deleted"]
+    assert [h.action for h in env.history()] == ["moved", "deleted", "deleted", "moved", "folder_deleted"]
+    assert not list(env.p("Filme_2D/M (2020)").glob("*.mediasort-old"))
 
 
 def test_execute_keep_new_target_occupied_by_unrelated_file(env):
@@ -461,7 +512,8 @@ def test_execute_unexpected_exception_marks_error_and_keeps_history(env, monkeyp
     monkeypatch.setattr(executor, "move_file", move)
     r = run(env, item)
     failed = env.get(item.id)
-    assert r.failed == 1 and failed.status == "error" and failed.error
+    assert r.failed == 1 and failed.status == "error"
+    assert failed.error.startswith("Dateifehler:") and "Keine Berechtigung" in failed.error
     assert [h.action for h in env.history()] == ["moved"]
     assert env.p("Downloads/Rel/m.de.srt").exists()
 
@@ -511,3 +563,154 @@ def test_execute_video_directly_in_input_root_keeps_root(env):
     r = run(env, item)
     assert r.done == 1 and env.p("Downloads").is_dir()
     assert [h.action for h in env.history()] == ["moved"]
+
+
+# --- Nachbesserung Review 1 -----------------------------------------------------------
+
+
+def test_library_rename_in_same_folder_keeps_folder(env):
+    folder = "Filme_2D/Sample People (2000)"
+    sparse(env.p(f"{folder}/spl-1080p.mkv"), 300 * MB)
+    target = f"{folder}/Sample People (2000) 1080p h264 AC3 [DE].mkv"
+    item = env.item(f"{folder}/spl-1080p.mkv", target)
+    r = run(env, item)
+    assert r.done == 1 and env.p(target).exists()
+    assert [h.action for h in env.history()] == ["moved"]
+
+
+def test_target_below_source_folder_is_never_cleaned(env):
+    # Quelle liegt direkt im Film-Ordner, das Ziel in einem Unterordner davon: der
+    # Ordner darf auch dann nicht weg, wenn das Ziel als Sample durchgehen würde.
+    sparse(env.p("Filme_2D/M (2020)/m.mkv"), 300 * MB)
+    target = "Filme_2D/M (2020)/Sample/M (2020) sample.mkv"
+    item = env.item("Filme_2D/M (2020)/m.mkv", target)
+    r = run(env, item)
+    assert r.done == 1 and env.p(target).exists()
+
+
+def test_collateral_movie_with_sample_in_title_is_kept(env):
+    other = sparse(env.p("Downloads/Pack/Sample.People.2000.1080p.mkv"), 3000 * MB)
+    sparse(env.p("Downloads/Pack/Other.Movie.2001.1080p.mkv"), 3000 * MB)
+    item = env.item("Downloads/Pack/Other.Movie.2001.1080p.mkv", "Filme_2D/Other Movie (2001)/Other Movie (2001).mkv")
+    r = run(env, item)
+    assert r.done == 1 and other.exists()
+
+
+def test_stale_done_item_of_other_scan_is_not_resolved(env):
+    unrelated = write(env.p("Filme_2D/X (1999)/X (1999).mkv"), b"fremd")
+    with env.sf() as s:
+        s.add(Item(source=str(env.p("Downloads/A/movie.mkv")), size=1, mtime=1, target=str(unrelated),
+                   status="done", scan_id=2))
+        s.add(History(ts=1, action="moved", old_path=str(env.p("Downloads/A/movie.mkv")),
+                      new_path=str(unrelated)))
+        s.commit()
+    item = env.item("Downloads/B/movie.mkv", "Filme_2D/Y (2020)/Y (2020).mkv",
+                    existing=["Downloads/A/movie.mkv"], decision="keep_new")
+    r = run(env, item)
+    assert r.done == 1 and unrelated.read_bytes() == b"fremd"
+
+
+def test_stale_done_item_without_history_is_not_resolved(env):
+    unrelated = write(env.p("Filme_2D/X (1999)/X (1999).mkv"), b"fremd")
+    with env.sf() as s:
+        s.add(Item(source=str(env.p("Downloads/A/movie.mkv")), size=1, mtime=1, target=str(unrelated),
+                   status="done", scan_id=1))
+        s.commit()
+    item = env.item("Downloads/B/movie.mkv", "Filme_2D/Y (2020)/Y (2020).mkv",
+                    existing=["Downloads/A/movie.mkv"], decision="keep_new")
+    run(env, item)
+    assert unrelated.read_bytes() == b"fremd"
+
+
+def test_same_scan_move_from_earlier_job_is_resolved(env):
+    first = env.item("Downloads/A/m.mkv", TARGET_2D, data=b"erste")
+    run(env, first)
+    second = env.item("Downloads/B/m.mkv", TARGET_2D, existing=["Downloads/A/m.mkv"],
+                      decision="keep_new", data=b"zweite")
+    r = execute(env.sf, [second.id], settings=env.settings, job_id=2)
+    assert r.done == 1 and env.p(TARGET_2D).read_bytes() == b"zweite"
+
+
+def test_keep_existing_source_is_not_resolved_as_moved(env):
+    old = write(env.p("Filme_2D/M (2020)/M (2020) 2160p.mkv"), b"besser")
+    first = env.item("Downloads/A/m.mkv", "Filme_2D/M (2020)/M (2020) 2160p.mkv",
+                     existing=["Filme_2D/M (2020)/M (2020) 2160p.mkv"], decision="keep_existing")
+    second = env.item("Downloads/B/m.mkv", "Filme_2D/M (2020)/M (2020) 720p.mkv",
+                      existing=["Downloads/A/m.mkv"], decision="keep_new")
+    r = run(env, first, second)
+    assert (r.done, r.failed) == (2, 0)
+    assert old.read_bytes() == b"besser"
+
+
+def test_keep_new_restores_occupying_file_when_move_fails(env, monkeypatch):
+    sub_target = "Filme_2D/M (2020)/M (2020) 1080p h264 AC3 [DE].de.srt"
+    write(env.p(TARGET_2D), b"alt")
+    write(env.p(sub_target), b"alt-sub")
+    item = env.item("Downloads/Rel/m.mkv", TARGET_2D, subs=[("Downloads/Rel/m.de.srt", sub_target)],
+                    existing=[TARGET_2D], decision="keep_new")
+    real_move = executor.move_file
+
+    def move(src, dst):
+        if src == env.p("Downloads/Rel/m.mkv"):
+            raise OSError(errno.EIO, "Ein-/Ausgabefehler", str(src))
+        real_move(src, dst)
+
+    monkeypatch.setattr(executor, "move_file", move)
+    r = run(env, item)
+    assert r.failed == 1
+    assert env.p(TARGET_2D).read_bytes() == b"alt" and env.p(sub_target).read_bytes() == b"alt-sub"
+    assert env.p("Downloads/Rel/m.mkv").read_bytes() == b"video"
+    assert not list(env.p("Filme_2D/M (2020)").glob("*.mediasort-old"))
+    assert env.history() == []
+
+
+def test_keep_new_refuses_when_parking_name_taken(env):
+    write(env.p(TARGET_2D), b"alt")
+    write(env.p(TARGET_2D + ".mediasort-old"), b"rest")
+    item = env.item("Downloads/Rel/m.mkv", TARGET_2D, existing=[TARGET_2D], decision="keep_new")
+    r = run(env, item)
+    assert r.failed == 1 and env.p(TARGET_2D).read_bytes() == b"alt"
+    assert env.p(TARGET_2D + ".mediasort-old").read_bytes() == b"rest"
+
+
+def test_execute_source_not_removed_logs_move_and_reports(env, monkeypatch):
+    item = env.item_to_filme_2d()
+    src = env.p("Downloads/Rel/m.mkv")
+    _exdev_once(monkeypatch)
+    real_unlink = os.unlink
+
+    def unlink(path, *a, **kw):
+        if Path(path) == src:
+            raise PermissionError(errno.EACCES, "Keine Berechtigung", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(executor.os, "unlink", unlink)
+    r = run(env, item)
+    failed = env.get(item.id)
+    assert r.failed == 1 and failed.status == "error" and "doppelt" in failed.error
+    assert env.p(TARGET_2D).exists() and src.exists()
+    assert [(h.action, h.new_path) for h in env.history()] == [("moved", str(env.p(TARGET_2D)))]
+
+
+def test_db_error_marks_item_and_job_continues(env, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    first = env.item("Downloads/A/m.mkv", "Filme_2D/A (2020)/A (2020).mkv")
+    second = env.item("Downloads/B/m.mkv", "Filme_2D/B (2020)/B (2020).mkv")
+    real_commit = Session.commit
+    calls = []
+
+    def commit(self):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("Datenbank gesperrt")
+        return real_commit(self)
+
+    monkeypatch.setattr(Session, "commit", commit)
+    r = run(env, first, second)
+    assert (r.done, r.failed) == (1, 1)
+    failed = env.get(first.id)
+    assert failed.status == "error" and failed.error == "Datenbankfehler: Datenbank gesperrt"
+    assert env.get(second.id).status == "done"
+    moved = [h.old_path for h in env.history() if h.action == "moved"]
+    assert moved == [str(env.p("Downloads/A/m.mkv")), str(env.p("Downloads/B/m.mkv"))]

@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from mediasort.scanner import SUB_EXT, VIDEO_EXT, letter_range, scan, subtitle_from_path
+from mediasort.scanner import (
+    SUB_EXT,
+    VIDEO_EXT,
+    is_sample_name,
+    letter_range,
+    owns_subtitle,
+    scan,
+    subtitle_from_path,
+)
 
 MB = 1024 * 1024
 GB = 1024 * MB
@@ -203,3 +211,14 @@ def test_unreadable_directory_reported(tmp_path, mk):
         os.chmod(tmp_path / "locked", 0o755)
     assert [v.path.name for v in r.videos] == ["b.mkv"]
     assert r.errors == [f"Ordner nicht lesbar: {tmp_path / 'locked'}"]
+
+
+def test_is_sample_name():
+    assert is_sample_name("rel-sample.mkv") and is_sample_name("Sample.People.2000.mkv")
+    assert not is_sample_name("Samples.mkv") and not is_sample_name("Resample.2020.mkv")
+
+
+def test_owns_subtitle():
+    assert owns_subtitle("Movie", "Movie.de.srt") and owns_subtitle("Movie", "movie srt")
+    assert owns_subtitle("Movie", "Movie")
+    assert not owns_subtitle("Movie", "Movies.de.srt") and not owns_subtitle("Movie", "Other.srt")

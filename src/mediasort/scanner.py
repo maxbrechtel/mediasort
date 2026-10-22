@@ -54,7 +54,12 @@ def subtitle_from_path(path: Path, video_stem: str | None = None) -> Subtitle:
     return Subtitle(path=path, language=language, forced=forced)
 
 
-def _owns(stem: str, subtitle_name: str) -> bool:
+def is_sample_name(name: str) -> bool:
+    """Dateiname enthält das Wort „sample“ (nicht als Teil eines längeren Wortes)."""
+    return bool(_SAMPLE_RE.search(name))
+
+
+def owns_subtitle(stem: str, subtitle_name: str) -> bool:
     """Untertitelname beginnt mit dem Videonamen, danach Trennzeichen oder Ende."""
     if not subtitle_name.lower().startswith(stem.lower()):
         return False
@@ -133,7 +138,7 @@ def scan(
             except OSError:
                 result.errors.append(f"Datei nicht lesbar: {path}")
                 continue
-            if _SAMPLE_RE.search(name) or st.st_size < sample_bytes:
+            if is_sample_name(name) or st.st_size < sample_bytes:
                 if str(path) not in ignored:
                     result.samples.append(path)
                 continue
@@ -153,7 +158,7 @@ def scan(
             if len(local) == 1:
                 mine = sub_paths
             else:
-                mine = [p for p in sub_paths if _owns(path.stem, p.name)]
+                mine = [p for p in sub_paths if owns_subtitle(path.stem, p.name)]
             result.videos.append(
                 VideoFile(
                     path=path, size=size, mtime=mtime, root=root,

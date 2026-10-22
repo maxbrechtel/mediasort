@@ -5,7 +5,9 @@ und Bibliothekswurzeln werden nie angelegt – nur Ordner darunter.
 """
 
 import errno
+import logging
 import os
+import re
 import shutil
 import time
 from collections.abc import Callable, Collection, Sequence
@@ -18,15 +20,20 @@ from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, History, Item
 from mediasort.models import ItemStatus
-from mediasort.scanner import _SAMPLE_RE, SUB_EXT, VIDEO_EXT, _owns
+from mediasort.scanner import SUB_EXT, VIDEO_EXT, owns_subtitle
 from mediasort.settings import Settings
 
+log = logging.getLogger(__name__)
+
 TMP_SUFFIX = ".mediasort-tmp"
+OLD_SUFFIX = ".mediasort-old"
 ROOT_MISSING = "Bibliotheksordner fehlt – ist die Freigabe eingebunden?"
 UNDECIDED = "Konflikt nicht entschieden"
 TARGET_TAKEN = "Ziel belegt"
 SOURCE_CHANGED = "Quelle wurde seit dem Scan verändert"
 _DECISIONS = (None, "keep_new", "keep_existing", "keep_both")
+_SAMPLE_DIRS = frozenset({"sample", "samples"})
+_SAMPLE_STEM_RE = re.compile(r"(?:^|[.\-_ ])sample$", re.IGNORECASE)
 
 
 def _ext(name: str) -> str:
@@ -41,12 +48,17 @@ def _exists(path: Path) -> bool:
 # --- Verschieben -----------------------------------------------------------------------
 
 
+class SourceNotRemoved(OSError):
+    """Die Kopie liegt vollständig am Ziel, aber die Quelle konnte nicht gelöscht werden."""
+
+
 def move_file(src: Path, dst: Path) -> None:
     """Verschiebt ``src`` nach ``dst``; ``FileExistsError``, wenn ``dst`` existiert.
 
     Über Dateisystemgrenzen (``EXDEV``) wird in ``<dst>.mediasort-tmp`` kopiert, die Größe
     verglichen, umbenannt und erst dann die Quelle gelöscht. Bei einem Fehler wird die
-    Teilkopie entfernt; die Quelle bleibt.
+    Teilkopie entfernt; die Quelle bleibt. Scheitert erst das Löschen der Quelle, liegt die
+    Datei an beiden Orten: ``SourceNotRemoved``.
     """
     src, dst = Path(src), Path(dst)
     if _exists(dst):
@@ -71,7 +83,12 @@ def move_file(src: Path, dst: Path) -> None:
         with suppress(OSError):
             tmp.unlink()  # Teilkopie entfernen; der ursprüngliche Fehler zählt
         raise
-    os.unlink(src)
+    try:
+        os.unlink(src)
+    except OSError as exc:
+        raise SourceNotRemoved(
+            exc.errno, f"Quelle nach dem Kopieren nicht gelöscht ({exc.strerror})", str(src)
+        ) from exc
 
 
 # --- Aufräumen -------------------------------------------------------------------------
@@ -92,18 +109,26 @@ def _is_guarded(folder: Path, protected: Collection[Path]) -> bool:
     return False
 
 
+def _is_leftover_sample(dirs: Sequence[str], name: str) -> bool:
+    """Großes Video, das trotzdem als Sample gilt: in einem Ordner ``Sample(s)`` oder
+    der Name endet auf das Wort ``sample`` (``rel-sample.mkv``, ``rel.sample.mkv``)."""
+    stem = name.rpartition(".")[0]
+    return any(d.lower() in _SAMPLE_DIRS for d in dirs) or bool(_SAMPLE_STEM_RE.search(stem))
+
+
 def _only_leftovers(folder: Path, exclude: Collection[str], sample_bytes: int) -> bool:
     """Kein echtes Video und kein Ausschlussordner darunter; alles lesbar.
 
-    Wie beim Scannen gilt ein Video als Sample, wenn „sample“ im Namen steht oder es nicht
-    größer als ``sample_bytes`` ist. Versteckte Ordner werden mit durchsucht.
+    Videos ab ``sample_bytes`` zählen als echt, außer sie sind eindeutig Samples (siehe
+    ``_is_leftover_sample``). Versteckte Ordner werden mit durchsucht.
     """
     unreadable: list[OSError] = []
     for dirpath, dirnames, filenames in os.walk(folder, onerror=unreadable.append):
         if any(d in exclude for d in dirnames):
             return False
+        rel_dirs = Path(dirpath).relative_to(folder).parts
         for name in filenames:
-            if _ext(name) not in VIDEO_EXT or _SAMPLE_RE.search(name):
+            if _ext(name) not in VIDEO_EXT:
                 continue
             path = Path(dirpath, name)
             try:
@@ -112,7 +137,7 @@ def _only_leftovers(folder: Path, exclude: Collection[str], sample_bytes: int) -
                 if path.is_symlink():
                     continue  # defekter Link, kein Video
                 return False
-            if size > sample_bytes:
+            if size >= sample_bytes and not _is_leftover_sample(rel_dirs, name):
                 return False
     return not unreadable
 
@@ -150,12 +175,18 @@ class _Failed(Exception):
     """Vorschlag kann nicht ausgeführt werden (deutsche Meldung)."""
 
 
+class _Duplicated(_Failed):
+    """Video liegt am Ziel, die Quelle aber ebenfalls noch."""
+
+
 @dataclass
 class _Context:
     settings: Settings
     libraries: list[Path]
     protected: frozenset[Path]
     report: ExecutionReport
+    placed: set[Path] = field(default_factory=set)  # in diesem Auftrag belegte Zielordner
+    moved: dict[str, str] = field(default_factory=dict)  # in diesem Auftrag verschoben: alt -> neu
 
 
 def _subtitles_of(video: Path) -> list[Path]:
@@ -168,9 +199,9 @@ def _subtitles_of(video: Path) -> list[Path]:
     stem = video.stem
     found = []
     for path in siblings:
-        if _ext(path.name) not in SUB_EXT or not _owns(stem, path.name):
+        if _ext(path.name) not in SUB_EXT or not owns_subtitle(stem, path.name):
             continue
-        if any(len(other) > len(stem) and _owns(other, path.name) for other in other_stems):
+        if any(len(other) > len(stem) and owns_subtitle(other, path.name) for other in other_stems):
             continue  # gehört zu einem Video mit längerem Namen
         if path.is_file():
             found.append(path)
@@ -184,20 +215,31 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
-def _resolve_existing(s: Session, conflict: dict | None, source: Path) -> list[Path]:
-    """Vorhandene Versionen; schon verschobene Quellen dieses Laufs über ihr Item auflösen."""
+def _moved_to(s: Session, raw: str, scan_id: int | None, moved_now: dict[str, str]) -> Path | None:
+    """Wohin wurde ``raw`` verschoben – in diesem Auftrag oder von einem Item desselben Scans?"""
+    if raw in moved_now:
+        return Path(moved_now[raw])
+    if scan_id is None:
+        return None
+    new_path = s.scalars(
+        select(History.new_path)
+        .join(Item, (Item.source == History.old_path) & (Item.target == History.new_path))
+        .where(History.action == "moved", History.old_path == raw, Item.scan_id == scan_id)
+        .order_by(History.id.desc())
+    ).first()
+    return Path(new_path) if new_path else None
+
+
+def _resolve_existing(s: Session, item: Item, source: Path, moved_now: dict[str, str]) -> list[Path]:
+    """Vorhandene Versionen; nicht mehr vorhandene Pfade nur über protokollierte Verschiebungen
+    desselben Auftrags bzw. Scans auflösen, sonst überspringen."""
     found: list[Path] = []
-    for raw in (conflict or {}).get("existing", []):
+    for raw in (item.conflict_json or {}).get("existing", []):
         path = Path(raw)
         if not path.is_file():
-            moved = s.scalars(
-                select(Item.target)
-                .where(Item.source == raw, Item.status == ItemStatus.DONE.value, Item.target.is_not(None))
-                .order_by(Item.id.desc())
-            ).first()
-            if moved is None or not Path(moved).is_file():
+            path = _moved_to(s, raw, item.scan_id, moved_now)
+            if path is None or not path.is_file():
                 continue
-            path = Path(moved)
         if path != source and path not in found and not _same_file(path, source):
             found.append(path)
     return found
@@ -227,6 +269,10 @@ def _make_dirs(root: Path, directory: Path) -> None:
                 raise
 
 
+def _parked(path: Path) -> Path:
+    return path.with_name(path.name + OLD_SUFFIX)
+
+
 class _ItemRun:
     """Führt einen Vorschlag aus und sammelt die durchgeführten Aktionen fürs Protokoll."""
 
@@ -237,8 +283,22 @@ class _ItemRun:
     def record(self, action: str, old: Path, new: Path | None = None) -> None:
         self.log.append((time.time(), action, str(old), str(new) if new is not None else None))
 
+    def history(self, job_id: int, auto: bool) -> list[History]:
+        return [History(ts=ts, job_id=job_id, action=action, old_path=old, new_path=new, auto=auto)
+                for ts, action, old, new in self.log]
+
+    def moves(self) -> dict[str, str]:
+        return {old: new for _, action, old, new in self.log if action == "moved"}
+
     def move(self, src: Path, dst: Path) -> None:
-        move_file(src, dst)
+        try:
+            move_file(src, dst)
+        except SourceNotRemoved as exc:
+            self.record("moved", src, dst)
+            raise _Duplicated(
+                f"Nach {dst} kopiert, aber die Quelle konnte nicht gelöscht werden – "
+                f"die Datei liegt jetzt doppelt vor: {src} ({exc.strerror})"
+            ) from exc
         self.record("moved", src, dst)
 
     def delete(self, path: Path) -> None:
@@ -252,6 +312,36 @@ class _ItemRun:
         self.delete(video)
         for sub in subs:
             self.delete(sub)
+
+    def park(self, files: Sequence[Path]) -> list[tuple[Path, Path]]:
+        """Belegende Dateien beiseite legen (``<Name>.mediasort-old``); bei Fehler zurücklegen."""
+        parked: list[tuple[Path, Path]] = []
+        try:
+            for original in files:
+                move_file(original, _parked(original))
+                parked.append((original, _parked(original)))
+        except BaseException as exc:
+            self.unpark(parked, exc)
+        return parked
+
+    def unpark(self, parked: Sequence[tuple[Path, Path]], exc: BaseException) -> None:
+        """Beiseite gelegte Dateien zurücklegen und ``exc`` weiterreichen."""
+        stuck = []
+        for original, aside in reversed(parked):
+            try:
+                move_file(aside, original)
+            except OSError:
+                stuck.append(str(aside))
+        if stuck and isinstance(exc, Exception):
+            raise _Failed(f"{_message(exc)}; alte Version liegt noch unter: {', '.join(stuck)}") from exc
+        raise exc
+
+    def drop_parked(self, parked: Sequence[tuple[Path, Path]]) -> None:
+        for original, aside in parked:
+            aside.unlink()
+            self.record("deleted", original)
+        if parked:
+            self.ctx.report.touched.add(parked[0][0].parent)
 
     def process(self, s: Session, item: Item) -> bool:
         """``True``: erledigt; ``False``: übersprungen (zurück auf „neu“). Fehler als Ausnahme."""
@@ -272,7 +362,7 @@ class _ItemRun:
         if st.st_size != item.size or st.st_mtime != item.mtime:
             raise _Failed(SOURCE_CHANGED)
         source_subs = list(item.subtitles_json or [])
-        existing = _resolve_existing(s, item.conflict_json, source)
+        existing = _resolve_existing(s, item, source, self.ctx.moved)
         report = self.ctx.report
 
         if decision == "keep_existing":
@@ -298,12 +388,22 @@ class _ItemRun:
         for _, sub_target in sub_moves:
             if _exists(sub_target) and sub_target not in replaced_subs:
                 raise _Failed(f"Untertitelziel belegt: {sub_target}")
+        for aside in map(_parked, [replaced, *replaced_subs] if replaced else []):
+            if _exists(aside):
+                raise _Failed(f"Zwischenname belegt: {aside}")
 
-        if replaced is not None:
-            self.delete_version(replaced)
         _make_dirs(root, target.parent)
+        self.ctx.placed.add(target.parent)
         report.touched.update((target.parent, source.parent))
-        self.move(source, target)
+        parked = self.park([replaced, *replaced_subs]) if replaced else []
+        try:
+            self.move(source, target)
+        except _Duplicated:
+            self.drop_parked(parked)  # neue Version liegt am Ziel
+            raise
+        except BaseException as exc:
+            self.unpark(parked, exc)
+        self.drop_parked(parked)
         for sub_source, sub_target in sub_moves:
             if sub_source.is_file():
                 self.move(sub_source, sub_target)
@@ -317,8 +417,12 @@ class _ItemRun:
     def cleanup(self, item: Item, folder: Path) -> None:
         settings = self.ctx.settings
         try:
-            deleted = cleanup_source(folder, protected=self.ctx.protected, exclude=settings.exclude,
-                                     sample_bytes=settings.sample_bytes)
+            deleted = cleanup_source(
+                folder,
+                protected=self.ctx.protected | self.ctx.placed,
+                exclude=settings.exclude,
+                sample_bytes=settings.sample_bytes,
+            )
         except OSError as exc:
             item.note = f"Ursprungsordner konnte nicht vollständig gelöscht werden: {exc}"
             return
@@ -326,7 +430,7 @@ class _ItemRun:
             self.record("folder_deleted", folder)
 
 
-def _message(exc: Exception) -> str:
+def _message(exc: BaseException) -> str:
     if isinstance(exc, _Failed):
         return str(exc)
     if isinstance(exc, FileExistsError):
@@ -336,29 +440,50 @@ def _message(exc: Exception) -> str:
     return f"Unerwarteter Fehler: {exc!r}"
 
 
+def _save_db_failure(session_factory: Callable[[], Session], item_id: int, run: _ItemRun,
+                     job_id: int, auto: bool, exc: Exception) -> None:
+    """Nach einem Datenbankfehler: Item als Fehler und Protokoll in frischer Sitzung speichern."""
+    try:
+        with session_factory() as s:
+            item = s.get(Item, item_id)
+            if item is not None:
+                item.status, item.error = ItemStatus.ERROR.value, f"Datenbankfehler: {exc}"
+            s.add_all(run.history(job_id, auto))
+            s.commit()
+    except Exception:  # der Auftrag soll trotzdem weiterlaufen
+        log.exception("Vorschlag %s: Fehler konnte nicht gespeichert werden", item_id)
+
+
 def _execute_one(session_factory: Callable[[], Session], item_id: int, ctx: _Context,
                  job_id: int, auto: bool) -> None:
-    with session_factory() as s:
-        item = s.get(Item, item_id)
-        if item is None or item.status != ItemStatus.CONFIRMED.value:
-            return
-        run = _ItemRun(ctx)
-        try:
-            done = run.process(s, item)
-        except Exception as exc:
-            s.rollback()
+    run = _ItemRun(ctx)
+    outcome = None  # "done" | "failed" | "skipped"; None: nicht ausführbar
+    try:
+        with session_factory() as s:
             item = s.get(Item, item_id)
-            item.status, item.error = ItemStatus.ERROR.value, _message(exc)
-            ctx.report.failed += 1
-        else:
-            if done:
-                item.status, item.error = ItemStatus.DONE.value, None
-                ctx.report.done += 1
-        s.add_all(
-            History(ts=ts, job_id=job_id, action=action, old_path=old, new_path=new, auto=auto)
-            for ts, action, old, new in run.log
-        )
-        s.commit()
+            if item is None or item.status != ItemStatus.CONFIRMED.value:
+                return
+            try:
+                outcome = "done" if run.process(s, item) else "skipped"
+            except Exception as exc:  # Fehler betreffen nur diesen Vorschlag
+                s.rollback()
+                item = s.get(Item, item_id)
+                item.status, item.error = ItemStatus.ERROR.value, _message(exc)
+                outcome = "failed"
+            else:
+                if outcome == "done":
+                    item.status, item.error = ItemStatus.DONE.value, None
+            s.add_all(run.history(job_id, auto))
+            s.commit()
+    except Exception as exc:  # Datenbankfehler: Auftrag läuft weiter
+        _save_db_failure(session_factory, item_id, run, job_id, auto, exc)
+        outcome = "failed"
+    finally:
+        ctx.moved.update(run.moves())
+    if outcome == "done":
+        ctx.report.done += 1
+    elif outcome == "failed":
+        ctx.report.failed += 1
 
 
 def execute(
