@@ -484,6 +484,8 @@ def _search_groups(ctx: PlanContext, entries: Sequence[_Entry]) -> None:
                 candidates = ctx.tmdb.search(first.kind, first.parsed.title, first.parsed.year)
             except TmdbError as exc:
                 error = str(exc)
+            except Exception as exc:  # unerwartet: betrifft nur diese Gruppe
+                error = f"TMDB-Suche fehlgeschlagen ({type(exc).__name__}): {exc}"
         for entry in members:
             entry.candidates, entry.tmdb_error = candidates, error
 
@@ -537,6 +539,20 @@ def _plan_entry(run: _Run, entry: _Entry, scan_id: int, auto: bool) -> Item | No
     return item if placed else None
 
 
+def _failed_item(video: VideoFile, folder: Folder, scan_id: int, auto: bool, exc: Exception,
+                 entry: _Entry | None = None) -> Item:
+    """Vorschlag für eine Datei, deren Planung unerwartet gescheitert ist (der Scan läuft weiter)."""
+    return Item(
+        scan_id=scan_id, folder_id=folder.id, source=str(video.path), size=video.size, mtime=video.mtime,
+        kind=(entry.kind if entry is not None else MediaKind.MOVIE).value,
+        parsed_json=_as_json(entry.parsed) if entry is not None else None,
+        group_key=entry.group_key if entry is not None else None,
+        status=ItemStatus.ERROR.value, confidence=Confidence.LOW.value, auto=auto,
+        subtitles_json=_subtitles_json(video.subtitles, None),
+        error=f"Unerwarteter Fehler bei der Planung ({type(exc).__name__}): {exc}",
+    )
+
+
 def _already_planned(
     video: VideoFile, planned: set[str], latest: dict[str, tuple[str, int, float]]
 ) -> bool:
@@ -587,10 +603,26 @@ def plan_folder(
             ignored=ignored,
             top_filter=subset,
         )
-        entries = [_entry(v, folder) for v in result.videos if not _already_planned(v, planned, latest)]
+        entries: list[_Entry] = []
+        items: list[Item] = []
+        for video in result.videos:
+            if _already_planned(video, planned, latest):
+                continue
+            try:
+                entries.append(_entry(video, folder))
+            except Exception as exc:  # betrifft nur diese Datei
+                items.append(_failed_item(video, folder, scan_id, auto, exc))
         _search_groups(ctx, entries)
         run = _Run(ctx, folder, folders)
-        items = [it for it in (_plan_entry(run, e, scan_id, auto) for e in entries) if it is not None]
+        for entry in entries:
+            try:
+                item = _plan_entry(run, entry, scan_id, auto)
+            except RootMissing:
+                raise  # Bibliothek nicht lesbar: der ganze Scan scheitert
+            except Exception as exc:  # betrifft nur diesen Vorschlag
+                item = _failed_item(entry.video, folder, scan_id, auto, exc, entry)
+            if item is not None:
+                items.append(item)
     except Exception:
         with ctx.session_factory() as s:
             row = s.get(Scan, scan_id)

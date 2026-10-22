@@ -135,3 +135,20 @@ def test_real_file_roundtrip(tmp_path):
     assert mi.video_codec == "mpeg4" and [a.language for a in mi.audio] == ["de", "en"] and mi.audio[0].default
     assert (mi.width, mi.height) == (1920, 800)
     assert not mi.audio[1].default
+
+
+def test_invalid_utf8_in_ffprobe_output_is_tolerated(tmp_path, monkeypatch):
+    # Abschlussprüfung I1: ein kaputtes Metadaten-Tag darf nicht den ganzen Scan abbrechen
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "ffprobe"
+    fake.write_bytes(
+        b'#!/bin/sh\nprintf \'{"streams":[{"codec_type":"video","width":1920,"height":1080,'
+        b'"codec_name":"h264","tags":{"title":"\\377\\376kaputt"}}]}\'\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    video = tmp_path / "x.mkv"
+    video.write_bytes(b"0")
+    mi = probe(video)
+    assert (mi.width, mi.video_codec) == (1920, "h264")

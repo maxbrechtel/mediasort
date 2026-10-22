@@ -17,7 +17,8 @@ class ProbeError(Exception):
 def run_ffprobe(path: Path, timeout: float = 60) -> dict:
     cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         raise ProbeError(f"ffprobe hat zu lange gebraucht (mehr als {timeout:g} s): {path}") from exc
     except OSError as exc:

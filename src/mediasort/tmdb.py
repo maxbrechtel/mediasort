@@ -120,6 +120,10 @@ class TmdbClient:
             return self._http.get("/" + path.lstrip("/"), params=query)
         except httpx.TransportError as exc:
             raise TmdbError(f"TMDB nicht erreichbar: {exc}") from exc
+        except httpx.RequestError as exc:  # z. B. DecodingError: Antwort nicht entpackbar
+            raise TmdbError(f"TMDB: Antwort nicht lesbar ({type(exc).__name__}: {exc})") from exc
+        except httpx.InvalidURL as exc:
+            raise TmdbError(f"TMDB: ungültige Anfrage ({exc})") from exc
 
     @staticmethod
     def _retry_after(response: httpx.Response) -> float:

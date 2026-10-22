@@ -278,3 +278,18 @@ def test_bearer_token_for_long_keys(requests_seen):
 ])
 def test_parse_reference(text, ref):
     assert TmdbClient.parse_reference(text) == ref
+
+
+def test_undecodable_response_raises_tmdb_error():
+    # Abschlussprüfung I1: gzip-Kopf, aber kein gzip-Inhalt -> httpx.DecodingError
+    client = make_client(lambda r: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"kein gzip"))
+    with pytest.raises(TmdbError, match="TMDB"):
+        client.search(MediaKind.MOVIE, "Matrix", None)
+
+
+def test_invalid_url_raises_tmdb_error():
+    def handler(request):
+        raise httpx.InvalidURL("Ungültige Adresse")
+
+    with pytest.raises(TmdbError, match="TMDB"):
+        make_client(handler).details(MediaKind.MOVIE, 1)

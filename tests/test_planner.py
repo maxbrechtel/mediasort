@@ -653,3 +653,34 @@ def test_changed_existing_file_is_not_deleted(env):
     assert r.failed == 1 and env.item(it.id).error == "Vorhandene Datei hat sich seit dem Scan verändert"
     assert old.read_bytes() == b"inzwischen ersetzt, andere Groesse" and src.exists()
     assert not Path(it.target).exists()
+
+
+# --- Abschlussprüfung I1: ein Fehler betrifft nur seinen Vorschlag --------------------------
+
+
+def test_unexpected_probe_error_marks_only_that_item(env):
+    bad = env.file("Downloads/Kaputt.2020/k.mkv", info=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"))
+    env.file("Downloads/The.Matrix.1999/m.mkv")
+    result = env.plan("Downloads")
+    items = {i.source: i for i in result.items()}
+    assert items[str(bad)].status == "error"
+    assert "UnicodeDecodeError" in items[str(bad)].error and "Fehler" in items[str(bad)].error
+    assert items[env.p("Downloads/The.Matrix.1999/m.mkv")].target is not None
+    with env.sm() as s:
+        assert s.get(Scan, result.scan_id).status == "done"
+
+
+def test_unexpected_search_error_marks_only_that_group(env, monkeypatch):
+    real_search = env.tmdb.search
+
+    def search(kind, title, year):
+        if title.lower() == "avatar":
+            raise RuntimeError("unerwartet")
+        return real_search(kind, title, year)
+
+    monkeypatch.setattr(env.tmdb, "search", search)
+    env.file("Downloads/Avatar.2009.1080p/a.mkv")
+    env.file("Downloads/The.Matrix.1999/m.mkv")
+    avatar, matrix = env.plan("Downloads").items()
+    assert avatar.confidence == "niedrig" and avatar.target is None and "RuntimeError" in avatar.error
+    assert matrix.target is not None and matrix.error is None
