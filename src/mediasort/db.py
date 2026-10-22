@@ -1,6 +1,7 @@
 """SQLite-Datenhaltung (SQLAlchemy 2): alle Tabellen aus Spec 10."""
 
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,11 @@ class FileState(Base):
     last_seen: Mapped[float] = mapped_column(Float)
 
 
+def casefold(text: str | None) -> str | None:
+    """Groß-/Kleinschreibung und Unicode-Normalform (NFC) vereinheitlichen; als SQL-Funktion ``py_casefold``."""
+    return None if text is None else unicodedata.normalize("NFC", text).casefold()
+
+
 def make_engine(db_path: Path) -> Engine:
     """SQLite-Engine mit WAL; Verbindungen dürfen von einem Hintergrund-Thread genutzt werden."""
     db_path = Path(db_path)
@@ -139,6 +145,7 @@ def make_engine(db_path: Path) -> Engine:
 
     @event.listens_for(engine, "connect")
     def _pragmas(dbapi_conn, _record):
+        dbapi_conn.create_function("py_casefold", 1, casefold, deterministic=True)
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA busy_timeout=5000")

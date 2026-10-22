@@ -459,9 +459,13 @@ def plan_folder(
     folder: Folder,
     *,
     subset: Callable[[str], bool] | None = None,
+    subset_label: str | None = None,
     auto: bool = False,
 ) -> int:
-    """Scannt ``folder``, legt einen ``Scan`` mit Vorschlägen an und gibt dessen ID zurück."""
+    """Scannt ``folder``, legt einen ``Scan`` mit Vorschlägen an und gibt dessen ID zurück.
+
+    ``subset_label`` ist die lesbare Bezeichnung des Ausschnitts (``Scan.subset``).
+    """
     with ctx.session_factory() as s:
         folders = {f.id: f for f in s.scalars(select(Folder))}
         ignored = set(s.scalars(select(Ignored.path)))
@@ -472,7 +476,8 @@ def plan_folder(
     _check_roots(folder, folders)
 
     with ctx.session_factory() as s:
-        scan_row = Scan(folder_id=folder.id, started=ctx.now(), status="running", auto=auto)
+        scan_row = Scan(folder_id=folder.id, started=ctx.now(), status="running", auto=auto,
+                        subset=subset_label)
         s.add(scan_row)
         s.commit()
         scan_id = scan_row.id

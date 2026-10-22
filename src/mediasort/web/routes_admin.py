@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 from starlette.datastructures import FormData
 
-from mediasort.db import Folder, History, Ignored, Item, LibraryEntry, Scan
+from mediasort.db import Folder, History, Ignored, Item, LibraryEntry, Scan, casefold
 from mediasort.models import ItemStatus
 from mediasort.plex import PlexClient, PlexError, PlexSection, suggest_mapping
 from mediasort.scanner import letter_range
@@ -186,6 +186,7 @@ PLEX_UNREACHABLE = ("Plex ist nicht erreichbar; ob der Papierkorb automatisch ge
 LIBRARY_NOTICES = {**NOTICES, "plex": PLEX_UNREACHABLE}
 RECENT_LIBRARY_SCANS = 10
 HISTORY_PAGE_SIZE = 100
+MAX_ID = 2**31 - 1
 _LETTER_ERROR = "Bitte je einen Buchstaben (A–Z) oder die Ziffer 0 angeben."
 
 
@@ -248,6 +249,11 @@ def library_page(request: Request, hinweis: str = ""):
     return _library_page(request, notice=LIBRARY_NOTICES.get(hinweis))
 
 
+def _is_id(text: str) -> bool:
+    """Ziffernfolge, die als Datenbank-ID taugt (ASCII, höchstens 9 Stellen)."""
+    return text.isascii() and text.isdecimal() and len(text) <= 9
+
+
 def _letter(value: str, default: str) -> str:
     value = (value.strip() or default).upper()
     if len(value) != 1 or not value.isascii() or not value.isalnum():
@@ -287,10 +293,11 @@ def library_scan(request: Request, form: Form):
               "from_letter": str(form.get("from_letter", "")) or "A",
               "to_letter": str(form.get("to_letter", "")) or "Z",
               "subfolder": str(form.get("subfolder", ""))}
+    numeric = _is_id(values["folder_id"])
     with state.sf() as s:
-        folder = s.get(Folder, int(values["folder_id"])) if values["folder_id"].isdigit() else None
+        folder = s.get(Folder, int(values["folder_id"])) if numeric else None
     if folder is None:
-        return _library_page(request, status_code=404 if values["folder_id"].isdigit() else 400,
+        return _library_page(request, status_code=404 if numeric else 400,
                              values=values, error="Bitte eine Bibliothek auswählen.")
     if folder.role != "library":
         return _library_page(request, status_code=400, values=values, error="Das ist keine Bibliothek.")
@@ -322,6 +329,7 @@ def library_scan(request: Request, form: Form):
 
 
 def _escape_like(text: str) -> str:
+    text = casefold(text)
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -332,13 +340,14 @@ def history_page(request: Request, q: str = "", auto: str = "", page: str = "1")
     if q:
         pattern = f"%{_escape_like(q)}%"
         query = query.where(
-            History.old_path.ilike(pattern, escape="\\") | History.new_path.ilike(pattern, escape="\\"))
+            func.py_casefold(History.old_path).like(pattern, escape="\\")
+            | func.py_casefold(History.new_path).like(pattern, escape="\\"))
     if auto in ("ja", "nein"):
         query = query.where(History.auto.is_(auto == "ja"))
     with request.app.state.sf() as s:
         total = s.scalar(select(func.count()).select_from(query.subquery())) or 0
         pages = max(1, -(-total // HISTORY_PAGE_SIZE))
-        number = min(max(int(page), 1) if page.isdecimal() else 1, pages)
+        number = min(max(int(page), 1) if _is_id(page) else 1, pages)
         rows = list(s.scalars(query.order_by(History.ts.desc(), History.id.desc())
                               .limit(HISTORY_PAGE_SIZE).offset((number - 1) * HISTORY_PAGE_SIZE)))
     return render(request, "history.html", active="/history", rows=rows, total=total,
@@ -359,7 +368,7 @@ def ignored_page(request: Request):
 def unignore(request: Request, path_id: int):
     """Ignorieren aufheben: der nächste Scan schlägt die Datei wieder vor (alte Vorschläge bleiben Historie)."""
     with request.app.state.sf() as s:
-        row = s.get(Ignored, path_id)
+        row = s.get(Ignored, path_id) if 0 < path_id <= MAX_ID else None
         if row is None:
             raise HTTPException(404, "Eintrag nicht gefunden")
         s.delete(row)

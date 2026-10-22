@@ -138,10 +138,7 @@ class Services:
         """Prüft einen Ausschnitt eines Ordners (Bibliothek prüfen); ``label`` steht im ``Scan``."""
         folder = self._folder(folder_id)
         with self._plan_context() as ctx:
-            scan_id = plan_folder(ctx, folder, subset=subset)
-        with self.sf() as s:
-            s.get(Scan, scan_id).subset = label
-            s.commit()
+            scan_id = plan_folder(ctx, folder, subset=subset, subset_label=label)
         return self._plan_message(scan_id)
 
     def run_items(

@@ -165,7 +165,30 @@ def test_library_scan_single_folder(client, library_tree):
     assert UNKNOWN_Z in sources(client.env)
 
 
+def test_library_scan_failed_keeps_label(client, library_tree, monkeypatch):
+    import mediasort.web.app as web_app
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaputt")
+
+    real = web_app.plan_folder
+
+    def failing(ctx, folder, **kwargs):
+        # der Scan-Eintrag entsteht in plan_folder; danach schlägt die Suche fehl
+        monkeypatch.setattr("mediasort.planner._search_groups", boom)
+        return real(ctx, folder, **kwargs)
+
+    monkeypatch.setattr(web_app, "plan_folder", failing)
+    scan(client, from_letter="A", to_letter="C")
+    with client.env.app.state.sf() as s:
+        row = s.scalars(select(Scan)).one()
+    assert row.status == "error" and row.subset == "A–C"
+
+
 @pytest.mark.parametrize("data", [
+    {"folder_id": "99999999999999999999"},
+    {"folder_id": "²"},
+
     {"mode": "folder", "subfolder": "Gibtsnicht"},
     {"mode": "folder", "subfolder": ""},
     {"mode": "folder", "subfolder": "../Filme_3D"},
@@ -204,7 +227,7 @@ def test_library_scan_busy_shows_notice(client, library_tree):
     try:
         r = client.post("/library/scan", data={"folder_id": client.env.filme_id}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/library?hinweis=busy"
-        assert "Es läuft bereits ein Auftrag" in client.get(r.headers["location"]).text
+        assert client.get(r.headers["location"]).text.count("Es läuft bereits ein Auftrag") == 1
         r = client.post("/library/scan", data={"folder_id": client.env.filme_id},
                         headers={"HX-Request": "true"})
         assert r.status_code == 200 and "Es läuft bereits ein Auftrag" in r.text
@@ -247,6 +270,24 @@ def test_history_search_and_auto_filter(client, history_rows):
     r = client.get("/history", params={"q": "matrix", "auto": "ja"})
     assert "/in/Matrix.leer" in r.text and "/in/Matrix.mkv" not in r.text
     assert "Keine Einträge" in client.get("/history", params={"q": "nichtda"}).text
+
+
+def test_history_search_is_unicode_case_insensitive(client):
+    import unicodedata
+    with client.env.app.state.sf() as s:
+        s.add_all([
+            History(ts=1.0, action="moved", old_path="/in/Über.mkv", new_path="/lib/Über (2000)/Über.mkv"),
+            History(ts=2.0, action="moved", old_path=unicodedata.normalize("NFD", "/in/Schön.mkv"), new_path=None),
+            History(ts=3.0, action="moved", old_path="/in/Anderes.mkv", new_path=None),
+        ])
+        s.commit()
+    for query in ("über", "ÜBER", "Über"):
+        text = client.get("/history", params={"q": query}).text
+        assert "/in/Über.mkv" in text and "Anderes" not in text
+    nfc = client.get("/history", params={"q": unicodedata.normalize("NFC", "schön")}).text
+    assert "Schön.mkv" in unicodedata.normalize("NFC", nfc) and "Anderes" not in nfc
+    nfd = client.get("/history", params={"q": unicodedata.normalize("NFD", "SCHÖN")}).text
+    assert "Anderes" not in nfd and "Keine Einträge" not in nfd
 
 
 def test_history_search_treats_wildcards_literally(client, history_rows):
@@ -324,3 +365,14 @@ def test_unignore_after_ignore_in_review_finds_file_again(client):
 
 def test_unignore_unknown_id(client):
     assert client.post("/ignored/999/remove", follow_redirects=False).status_code == 404
+
+
+def test_unignore_rejects_huge_id(client):
+    assert client.post(f"/ignored/{2**63}/remove", follow_redirects=False).status_code == 404
+    assert client.post(f"/ignored/{2**31}/remove", follow_redirects=False).status_code == 404
+    assert client.post("/ignored/0/remove", follow_redirects=False).status_code == 404
+
+
+def test_history_page_huge_number_is_clamped(client, history_rows):
+    assert client.get("/history", params={"page": "9" * 40}).status_code == 200
+    assert client.get("/history", params={"page": "²"}).status_code == 200
