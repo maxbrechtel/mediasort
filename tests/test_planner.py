@@ -780,3 +780,45 @@ def test_case_only_rename_in_library_is_no_conflict(env, monkeypatch):
     [it] = env.plan("Filme_2D").items()
     assert it.source == str(src) and it.conflict_json is None
     assert it.target == env.p("Filme_2D/Matrix (1999)/Matrix (1999) 1080p h264 DTS [DE+EN].mkv")
+
+
+# --- Abschlussprüfung I6: Bibliotheksmodus für große Serien --------------------------------
+
+
+def test_library_episodes_are_parsed_once_per_run(env, monkeypatch):
+    from mediasort import library
+
+    for e in range(1, 9):
+        env.file(f"Serien/Reacher (2022)/Season 4/reacher.s04e0{e}.720p.mkv")
+    calls = Counter()
+    real_parse = library.parse_name
+
+    def counting(name, parent=None):
+        calls[name] += 1
+        return real_parse(name, parent)
+
+    monkeypatch.setattr(library, "parse_name", counting)
+    items = env.plan("Serien").items()
+    assert len(items) == 8
+    assert len(calls) == 8 and set(calls.values()) == {1}
+
+
+def test_items_are_committed_in_batches(env, monkeypatch):
+    from mediasort import planner
+
+    monkeypatch.setattr(planner, "COMMIT_BATCH", 2)
+    for name in ("A", "B", "C", "D", "E"):
+        env.file(f"Downloads/Unbekannt.{name}.2020/x.mkv")
+    seen: list[int] = []
+    real_probe = env.ctx.probe
+
+    def probe(path):
+        with env.sm() as s:
+            seen.append(s.query(Item).count())
+        return real_probe(path)
+
+    env.ctx.probe = probe
+    result = env.plan("Downloads")
+    assert seen == [0, 0, 2, 2, 4] and len(result.items()) == 5
+    with env.sm() as s:
+        assert s.get(Scan, result.scan_id).status == "done"

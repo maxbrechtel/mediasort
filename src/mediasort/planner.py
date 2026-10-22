@@ -37,6 +37,7 @@ SERIES_NOTE = "sieht aus wie eine Serienfolge"
 NO_EPISODE_NOTE = "keine Folgennummer erkannt"
 ALREADY_CORRECT_NOTE = "Datei liegt bereits richtig"
 SMALL_VIDEO_HINT = "Kleine Videodatei übersprungen (unter Sample-Grenze): {}"
+COMMIT_BATCH = 200  # Vorschläge werden in Paketen gespeichert, damit ein langer Scan sichtbar vorankommt
 _OPEN_STATUSES = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
 _REPLANNABLE = (ItemStatus.NEW.value, ItemStatus.ERROR.value, ItemStatus.CONFIRMED.value)
 _CONFIDENCE_ORDER = (Confidence.LOW, Confidence.MEDIUM, Confidence.HIGH)
@@ -611,7 +612,14 @@ def plan_folder(
             top_filter=subset,
         )
         entries: list[_Entry] = []
-        items: list[Item] = []
+        items: list[Item] = []  # noch nicht gespeichert
+
+        def save_batch() -> None:
+            with ctx.session_factory() as s:
+                s.add_all(items)
+                s.commit()
+            items.clear()
+
         for video in result.videos:
             if _already_planned(video, planned, latest):
                 continue
@@ -632,6 +640,8 @@ def plan_folder(
                 item = _failed_item(entry.video, folder, scan_id, auto, exc, entry)
             if item is not None:
                 items.append(item)
+            if len(items) >= COMMIT_BATCH:
+                save_batch()
     except Exception:
         with ctx.session_factory() as s:
             row = s.get(Scan, scan_id)
