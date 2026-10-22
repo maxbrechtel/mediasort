@@ -221,6 +221,13 @@ def test_plex_unreachable_warning(client_with_plex):
     assert r.status_code == 200 and "Plex nicht erreichbar" in r.text
 
 
+def test_health_returns_plain_ok(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.text == "ok"
+    assert r.headers["content-type"].startswith("text/plain")
+
+
 def test_static_htmx_is_served(client):
     r = client.get("/static/htmx.min.js")
     assert r.status_code == 200 and 'version:"2.0.4"' in r.text

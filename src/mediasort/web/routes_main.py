@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -70,6 +70,12 @@ def _input_rows(s: Session) -> list[InputRow]:
         errors = list(last_scan.errors_json or []) if last_scan is not None else []
         rows.append(InputRow(folder=folder, open_count=open_count, scan_errors=errors))
     return rows
+
+
+@router.get("/health", response_class=PlainTextResponse)
+def health() -> str:
+    """Lebenszeichen für den Docker-Healthcheck."""
+    return "ok"
 
 
 @router.get("/")

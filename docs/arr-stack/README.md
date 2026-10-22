@@ -117,13 +117,25 @@ nano .env        # Zugangsdaten, HOME_SUBNET, PUID/PGID eintragen
 
 `PUID`/`PGID` müssen zu `uid`/`gid` in der fstab-Zeile passen.
 
-**mediasort** ist erst nach Abschluss der Umsetzung als Image verfügbar. Bis dahin
-den Block `mediasort:` in `docker-compose.yml` auskommentieren. Danach, weil das
-Repository privat ist, einmalig bei GitHub anmelden (Token mit `read:packages`):
+Den Konfigurationsordner von mediasort vorher anlegen, damit er `PUID:PGID`
+gehört (sonst legt Docker ihn als `root` an):
+
+```bash
+mkdir -p mediasort && chown 1000:1000 mediasort     # PUID:PGID
+```
+
+**mediasort** kommt als fertiges Image aus der GitHub Container Registry
+(`ghcr.io/maxbrechtel/mediasort:latest`). Weil das Repository privat ist, einmalig
+bei GitHub anmelden (Token mit `read:packages`):
 
 ```bash
 docker login ghcr.io -u maxbrechtel
 ```
+
+Im gemeinsamen Gluetun-Netzwerk belegt SABnzbd schon den Port 8080. mediasort
+lauscht deshalb über `MEDIASORT_PORT=8090` auf **8090** (so steht es im
+`mediasort:`-Block der `docker-compose.yml`); der Gesundheitstest des Images
+folgt dieser Einstellung automatisch.
 
 Starten:
 

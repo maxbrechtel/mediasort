@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.superpowers
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.egg-info
+build
+dist
+tests
+config
+docs
+tmpcfg
