@@ -1,0 +1,44 @@
+{
+  "_id": "5256c8c219c2956ff604858a",
+  "air_date": "2010-03-21",
+  "name": "Staffel 3",
+  "season_number": 3,
+  "episodes": [
+    {
+      "air_date": "2010-03-21",
+      "episode_number": 1,
+      "id": 62001,
+      "name": "",
+      "overview": "",
+      "season_number": 3,
+      "runtime": 47
+    },
+    {
+      "air_date": "2010-03-21",
+      "episode_number": 2,
+      "id": 62002,
+      "name": "Pferd ohne Namen",
+      "overview": "",
+      "season_number": 3,
+      "runtime": 47
+    },
+    {
+      "air_date": "2010-03-21",
+      "episode_number": 3,
+      "id": 62003,
+      "name": "I.F.T.",
+      "overview": "",
+      "season_number": 3,
+      "runtime": 47
+    },
+    {
+      "air_date": "2010-03-21",
+      "episode_number": 5,
+      "id": 62005,
+      "name": "Episode 5",
+      "overview": "",
+      "season_number": 3,
+      "runtime": 47
+    }
+  ]
+}
