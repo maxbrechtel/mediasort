@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import FormData
 
 from mediasort.db import Folder, History, Ignored, Item, LibraryEntry, Scan, casefold
-from mediasort.models import ItemStatus
+from mediasort.models import AutoLevel, ItemStatus
 from mediasort.plex import PlexClient, PlexError, PlexSection, suggest_mapping
 from mediasort.scanner import letter_range
 from mediasort.settings import load_settings, save_settings
@@ -121,11 +121,14 @@ def edit_folder(request: Request, folder_id: int, form: Form):
             raise HTTPException(404, FOLDER_NOT_FOUND)
         try:
             options = parse_folder_options(form, folder.role, _library_ids(s))
-            # die Automatik-Stufe lässt sich immer ändern, auch bei einem Altbestand mit ineinander
-            # liegenden Ordnern (Abschlussprüfung R5); alles andere nur ohne Überschneidung
-            only_automation = all(getattr(folder, k) == v for k, v in options.items() if k != "auto_level")
+            # Abschalten der Automatik geht immer, auch bei einem Altbestand mit ineinander liegenden
+            # Ordnern (Abschlussprüfung R5); alles andere – auch Einschalten – nur ohne Überschneidung
+            switch_off_only = (
+                options["auto_level"] in (AutoLevel.OFF.value, folder.auto_level)
+                and all(getattr(folder, k) == v for k, v in options.items() if k != "auto_level")
+            )
             others = s.scalars(select(Folder.path).where(Folder.id != folder.id))
-            if not only_automation and (error := overlap_error(folder.path, others)):
+            if not switch_off_only and (error := overlap_error(folder.path, others)):
                 raise FormError(error)
         except FormError as exc:
             return _settings_page(request, status_code=400, folder_error=str(exc))

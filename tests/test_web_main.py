@@ -747,15 +747,16 @@ def test_overlapping_folder_can_still_change_automation(client):
     assert r.status_code == 303
     with client.app.state.sf() as s:
         assert s.get(Folder, inner_id).auto_level == "off"
-    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "auto_level": "detect"},
+    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "auto_level": "off"},
                     follow_redirects=False)
-    assert r.status_code == 303
-    # zusammen mit einer anderen Änderung gilt weiter die Prüfung auf Überschneidung
-    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "auto_level": "off", "media_type": "movie"})
-    assert r.status_code == 400 and "überschneidet sich" in r.text
+    assert r.status_code == 303  # unverändert lassen geht auch
+    # Einschalten und jede andere Änderung: weiter die Prüfung auf Überschneidung
+    for data in ({"auto_level": "detect"}, {"auto_level": "auto"}, {"auto_level": "off", "media_type": "movie"}):
+        r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, **data})
+        assert r.status_code == 400 and "überschneidet sich" in r.text
     with client.app.state.sf() as s:
         folder = s.get(Folder, inner_id)
-        assert (folder.auto_level, folder.media_type) == ("detect", "auto")
+        assert (folder.auto_level, folder.media_type) == ("off", "auto")
 
 
 def test_scan_accepts_only_input_folders(client, media_tree):
