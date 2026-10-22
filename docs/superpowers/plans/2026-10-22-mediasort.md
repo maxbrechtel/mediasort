@@ -365,7 +365,9 @@ def test_subtitle_targets(tmp_path):
 | `Star Wars - Das Erwachen der Macht (2015) 3D.iso` | movie | Star Wars Das Erwachen der Macht | 2015 | | | is_3d |
 | `die.purpurnen.fluesse.2000.german.dl.2160p.uhd.bluray.x265-endstation.sample.mkv` | movie | die purpurnen fluesse | 2000 | | | is_sample |
 | `y2x24go2wrcp.mkv`, parent `The Little Things 2021 German AC3D DL 2160p UHD BluRay DV HDR HEVC Remux-QfG DDL - NIMA4K org` | movie | The Little Things | 2021 | | | languages `("de","en")` |
-| `The.Continental.S01E02.mkv`, parent `The Continental Aus der Welt von John Wick 2023 S01 German EAC3 DL …` | episode | The Continental | – | 1 | (2,) | |
+| `The.Continental.S01E02.mkv`, parent `The Continental Aus der Welt von John Wick 2023 S01 German EAC3 DL …` | episode | The Continental | 2023 | 1 | (2,) | languages `("de","en")` |
+| `matrix.mkv`, parent `The.Matrix.1999.German.DL.1080p.BluRay.x264` | movie | matrix | 1999 | | | languages `("de","en")` |
+| `Breaking.Bad.S01E01.mkv`, parent `Unrelated.Show.2015.German` | episode | Breaking Bad | – | 1 | (1,) | Ordner-Jahr nicht übernommen |
 
 Zusätzlich:
 ```python
@@ -385,7 +387,7 @@ def test_normalize_title():
   - Sprachen: guessit `language` (`de`, `mul` …) → zweistellig; `mul` bedeutet bei vorhandenem `de` zusätzlich `en`; `mul` selbst entfällt.
   - 3D: guessit `other` enthält `3D`; Format: `Half Side By Side`→`HSBS`, `Side By Side`→`SBS`, `Half Over Under`→`HOU`, `Over Under`→`OU`; zusätzlich Regex `\b(TAB|MVC)\b` im Namen.
   - Sample: `other` enthält `Sample` oder Name enthält `sample` (case-insensitiv).
-  - Ordner: wenn `is_garbage_title(title)` oder kein Titel → `parent` parsen und pro Feld zusammenführen (Dateiname gewinnt bei Staffel/Folge; Titel, Jahr und Sprachen kommen aus dem Ordner, wenn der Datei-Titel Müll ist). Zusätzlich: Liefert der Ordner ein Jahr und die Datei nicht, wird es übernommen.
+  - Ordner: `parent` wird immer geparst, wenn angegeben. Ist der Datei-Titel Müll oder fehlt → Titel, Jahr und Sprachen aus dem Ordner (Staffel/Folge aus der Datei, falls vorhanden). Sonst werden Jahr und Sprachen aus dem Ordner nur übernommen, wenn sie in der Datei fehlen **und** der normalisierte Ordnertitel mit dem normalisierten Dateititel beginnt oder gleich ist.
   - `is_garbage_title`: `None`, kürzer als 3 Zeichen, oder `^[a-z0-9]{8,}$` mit mindestens 2 Ziffern und keinem Leerzeichen.
 - [ ] **Step 4: Run** → PASS
 - [ ] **Step 5: Commit** `"Parser für Datei- und Ordnernamen"`
@@ -545,8 +547,9 @@ def test_no_year_and_two_similar_candidates_is_medium():
     m = match(P("Dune", None), [M(841, "Dune", 1984, pop=50), M(438631, "Dune", 2021, pop=40)])
     assert m.confidence is Confidence.MEDIUM and len(m.alternatives) == 1
 
-def test_partial_title_is_medium():  # "M3GAN" vs "M3GAN 2.0", Jahr passt
-    assert match(P("M3GAN", 2025), [M(1071585, "M3GAN 2.0", 2025)]).confidence is Confidence.MEDIUM
+def test_partial_title_is_not_high():  # "M3GAN" vs "M3GAN 2.0" (Ähnlichkeit ≈ 71), Jahr passt
+    m = match(P("M3GAN", 2025), [M(505642, "M3GAN", 2022), M(1071585, "M3GAN 2.0", 2025)])
+    assert m.candidate.tmdb_id == 1071585 and m.confidence is not Confidence.HIGH
 
 def test_missing_episode_downgrades():
     assert match(P("Reacher", None, kind=EP), [TV(108978, "Reacher", 2022)], episode_exists=False).confidence is not Confidence.HIGH
@@ -610,6 +613,8 @@ def test_episode_files(tmp_path):
 
 **Files:**
 - Create: `src/mediasort/planner.py`, `tests/test_planner.py`
+
+Hinweis: Pfade wie `/media/Filme_2D/...` in den Tests stehen für die Test-Wurzel (`env.root`), nicht wörtlich für `/media`.
 
 **Interfaces:**
 - Consumes: `scan`, `parse_name`, `TmdbClient`, `match`, `probe`, `movie_relpath`, `episode_relpath`, `subtitle_targets`, `LibraryIndex`, `episode_files`, `better`, `Settings`, `Folder`, `Item`
@@ -828,7 +833,7 @@ def test_library_folders_never_automatic(w): ...
   - `main() -> None` – `uvicorn.run(create_app(Path(os.environ.get("MEDIASORT_CONFIG", "/config"))), host="0.0.0.0", port=8080)`
   - Routen: `GET /` (Übersicht), `POST /scan/{folder_id}`, `GET /jobs/current` (HTMX-Fragment, pollt alle 2 s solange aktiv), `GET /settings`, `POST /settings`, `POST /settings/folders`, `POST /settings/folders/{id}/delete`, `POST /settings/plex/test`
   - App-Zustand (`app.state`): `sf`, `runner`, `watcher`, Fabriken für `TmdbClient`/`PlexClient` aus aktuellen Settings
-  - Beim Start mit `start_background=True`: `runner.start()` und ein asyncio-Task, der alle `poll_minutes` `watcher.tick()` im Runner-Thread anstößt
+  - Beim Start immer `runner.start()`; nur mit `start_background=True` zusätzlich ein asyncio-Task, der alle `poll_minutes` `watcher.tick()` im Runner-Thread anstößt
 
 - [ ] **Step 1: Failing tests** (FastAPI `TestClient`, `start_background=False`)
 
@@ -847,7 +852,7 @@ def test_settings_save_and_folder_crud(client):
 
 def test_scan_starts_job_and_reports(client, media_tree):
     r = client.post(f"/scan/{downloads_id}"); assert r.status_code in (200, 303)
-    client.app.state.runner.wait_idle(10)  # Runner im Test synchron gestartet
+    client.app.state.runner.wait_idle(10)  # Runner läuft auch mit start_background=False
     assert "Vorschläge" in client.get("/jobs/current").text
 
 def test_plex_test_button_suggests_mapping(client_with_plex): ...  # zeigt "/media/Filme_2D → /media/Filme_2D"
