@@ -75,7 +75,8 @@ class Item(Base):
 
 class Ignored(Base):
     __tablename__ = "ignored"
-    path: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    path: Mapped[str] = mapped_column(String, unique=True)
     size: Mapped[int] = mapped_column(Integer)
     created: Mapped[float] = mapped_column(Float)
 

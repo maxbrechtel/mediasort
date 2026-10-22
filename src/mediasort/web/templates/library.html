@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Bibliothek prüfen{% endblock %}
+{% block content %}
+<h1>Bibliothek prüfen</h1>
+
+{% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if trash.hint %}<p class="notice">{{ trash.hint }}</p>{% endif %}
+
+<section class="card">
+  <p>Eine Bibliothek wird wie ein Eingangsordner gescannt, Ziel ist die Bibliothek selbst. Dateien, die schon
+     richtig heißen und liegen, erzeugen keinen Vorschlag; Dubletten erscheinen als Konflikte in der
+     <a href="/review">Prüfliste</a>.</p>
+
+  {% if libraries %}
+  <form method="post" action="/library/scan" class="library-form">
+    {% if trash.warn %}
+    <div class="notice">
+      <p>{{ trash_warning }}</p>
+      <label><input type="checkbox" name="confirm_trash_warning" value="on"> Ich habe die Warnung gelesen</label>
+    </div>
+    {% endif %}
+
+    <label>Bibliothek
+      <select name="folder_id" required>
+        {% for library in libraries %}
+        <option value="{{ library.id }}"{% if values.folder_id == library.id | string %} selected{% endif %}>{{ library.path }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <fieldset>
+      <legend>Ausschnitt</legend>
+      <label><input type="radio" name="mode" value="letters"{% if values.mode != "folder" %} checked{% endif %}> Anfangsbuchstaben</label>
+      <div class="letters">
+        <label>von <input type="text" name="from_letter" value="{{ values.from_letter }}" maxlength="1" size="2"></label>
+        <label>bis <input type="text" name="to_letter" value="{{ values.to_letter }}" maxlength="1" size="2"></label>
+        <span class="muted">Ziffern und Sonderzeichen zählen als „0“.</span>
+      </div>
+      <label><input type="radio" name="mode" value="folder"{% if values.mode == "folder" %} checked{% endif %}> Einzelner Ordner</label>
+      <label>Ordnername (genau, z. B. „Matrix (1999)“)
+        <input type="text" name="subfolder" value="{{ values.subfolder }}">
+      </label>
+    </fieldset>
+
+    <button type="submit">Bibliothek prüfen</button>
+  </form>
+  {% else %}
+  <p class="muted">Noch keine Bibliothek eingetragen. <a href="/settings">Ordner in den Einstellungen anlegen</a>.</p>
+  {% endif %}
+</section>
+
+{% include "_job.html" %}
+
+<section class="card">
+  <h2>Letzte Prüfungen</h2>
+  {% if scans %}
+  <table class="stack">
+    <thead><tr><th>Bibliothek</th><th>Ausschnitt</th><th>Zeit</th><th>Status</th><th class="num">Vorschläge</th></tr></thead>
+    <tbody>
+    {% for row in scans %}
+      <tr>
+        <td data-label="Bibliothek"><code>{{ row.folder }}</code></td>
+        <td data-label="Ausschnitt">{{ row.scan.subset or "alles" }}</td>
+        <td data-label="Zeit">{{ row.scan.started | zeit }}</td>
+        <td data-label="Status"><span class="badge status-{{ row.scan.status }}">{{ JOB_STATUSES.get(row.scan.status, row.scan.status) }}</span></td>
+        <td class="num" data-label="Vorschläge">{{ row.count }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p><a href="/review">Zur Prüfliste</a></p>
+  {% else %}
+  <p class="muted">Noch keine Bibliothek geprüft.</p>
+  {% endif %}
+</section>
+{% endblock %}

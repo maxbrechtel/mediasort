@@ -114,13 +114,7 @@ class Services:
         with self._tmdb() as (_settings, tmdb):
             return tmdb.search(kind, query, year)
 
-    def scan_folder(self, folder_id: int) -> str:
-        """Manueller Scan als Auftrag; Ergebnistext für die Übersicht."""
-        with self.sf() as s:
-            folder = s.get(Folder, folder_id)
-        if folder is None:
-            raise LookupError("Ordner ist nicht mehr eingetragen")
-        scan_id = self.plan(folder, False)
+    def _plan_message(self, scan_id: int) -> str:
         with self.sf() as s:
             count = s.scalar(select(func.count(Item.id)).where(Item.scan_id == scan_id)) or 0
             errors = s.get(Scan, scan_id).errors_json or []
@@ -128,6 +122,27 @@ class Services:
         if errors:
             message += f"; {len(errors)} Pfade nicht lesbar"
         return message
+
+    def _folder(self, folder_id: int) -> Folder:
+        with self.sf() as s:
+            folder = s.get(Folder, folder_id)
+        if folder is None:
+            raise LookupError("Ordner ist nicht mehr eingetragen")
+        return folder
+
+    def scan_folder(self, folder_id: int) -> str:
+        """Manueller Scan als Auftrag; Ergebnistext für die Übersicht."""
+        return self._plan_message(self.plan(self._folder(folder_id), False))
+
+    def plan_subset(self, folder_id: int, subset: Callable[[str], bool], label: str) -> str:
+        """Prüft einen Ausschnitt eines Ordners (Bibliothek prüfen); ``label`` steht im ``Scan``."""
+        folder = self._folder(folder_id)
+        with self._plan_context() as ctx:
+            scan_id = plan_folder(ctx, folder, subset=subset)
+        with self.sf() as s:
+            s.get(Scan, scan_id).subset = label
+            s.commit()
+        return self._plan_message(scan_id)
 
     def run_items(
         self,

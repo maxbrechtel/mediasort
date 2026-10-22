@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Ignoriert{% endblock %}
+{% block content %}
+<h1>Ignoriert</h1>
+<p>Ignorierte Dateien werden bei Scans übersprungen. Nach dem Aufheben schlägt der nächste Scan sie wieder vor.</p>
+
+{% if rows %}
+<table class="stack">
+  <thead><tr><th>Pfad</th><th class="num">Größe</th><th>Ignoriert am</th><th></th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      <td data-label="Pfad"><code>{{ row.path }}</code></td>
+      <td class="num nowrap" data-label="Größe">{{ row.size | groesse }}</td>
+      <td class="nowrap" data-label="Ignoriert am">{{ row.created | zeit }}</td>
+      <td>
+        <form method="post" action="/ignored/{{ row.id }}/remove">
+          <button type="submit" class="secondary">Aufheben</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Keine ignorierten Dateien.</p>
+{% endif %}
+{% endblock %}

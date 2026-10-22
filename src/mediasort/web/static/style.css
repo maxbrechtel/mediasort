@@ -179,3 +179,9 @@ form.correct > button { align-self: flex-start; }
   table.stack td.folder-actions { display: flex; }
   table.stack td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); }
 }
+
+/* Bibliothek prüfen */
+.library-form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 40rem; }
+.library-form fieldset { border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; gap: 0.5rem; }
+.library-form button { align-self: flex-start; }
+.letters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin-left: 1.5rem; }

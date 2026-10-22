@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Verlauf{% endblock %}
+{% macro page_link(number, label) %}
+<a href="/history?{{ {"q": q, "auto": auto, "page": number} | urlencode }}">{{ label }}</a>
+{% endmacro %}
+{% block content %}
+<h1>Verlauf</h1>
+
+<form class="filters" method="get" action="/history">
+  <label>Pfad enthält
+    <input type="search" name="q" value="{{ q }}">
+  </label>
+  <label>Ausgeführt
+    <select name="auto">
+      <option value="">alle</option>
+      <option value="nein"{% if auto == "nein" %} selected{% endif %}>manuell</option>
+      <option value="ja"{% if auto == "ja" %} selected{% endif %}>automatisch</option>
+    </select>
+  </label>
+  <button type="submit" class="secondary">Suchen</button>
+</form>
+
+{% if rows %}
+<table class="stack">
+  <thead><tr><th>Zeit</th><th>Aktion</th><th>Alter Pfad</th><th>Neuer Pfad</th><th>Art</th></tr></thead>
+  <tbody>
+  {% for entry in rows %}
+    <tr>
+      <td class="nowrap" data-label="Zeit">{{ entry.ts | zeit }}</td>
+      <td data-label="Aktion">{{ ACTIONS.get(entry.action, entry.action) }}</td>
+      <td data-label="Alter Pfad"><code>{{ entry.old_path or "–" }}</code></td>
+      <td data-label="Neuer Pfad">{% if entry.new_path %}<code>{{ entry.new_path }}</code>{% else %}–{% endif %}</td>
+      <td data-label="Art">{{ "automatisch" if entry.auto else "manuell" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="muted">{{ total }} Einträge · Seite {{ page }} von {{ pages }}
+  {% if page > 1 %} · {{ page_link(page - 1, "zurück") }}{% endif %}
+  {% if page < pages %} · {{ page_link(page + 1, "weiter") }}{% endif %}
+</p>
+{% else %}
+<p class="muted">Keine Einträge{% if q or auto %} für diese Suche{% endif %}.</p>
+{% endif %}
+{% endblock %}

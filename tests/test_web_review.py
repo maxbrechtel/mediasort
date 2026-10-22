@@ -471,7 +471,7 @@ def test_ignore_persists_across_scans(client, planned):
     assert r.status_code == 200 and r.text == ""
     assert env.get(item.id).status == "ignored"
     with env.app.state.sf() as s:
-        ignored = s.get(Ignored, item.source)
+        ignored = s.scalars(select(Ignored).where(Ignored.path == item.source)).one()
         assert ignored is not None and ignored.size == item.size and ignored.created > 0
     env.plan()
     assert env.item(UNKNOWN_FILE).id == item.id  # kein neuer Vorschlag

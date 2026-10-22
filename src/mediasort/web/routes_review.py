@@ -459,7 +459,8 @@ def ignore(request: Request, item_id: int):
         if item.status not in _VISIBLE:
             return _row_response(request, item_id, 409, NOT_OPEN)
         item.status = ItemStatus.IGNORED.value
-        s.merge(Ignored(path=item.source, size=item.size, created=time.time()))
+        if s.scalars(select(Ignored).where(Ignored.path == item.source)).first() is None:
+            s.add(Ignored(path=item.source, size=item.size, created=time.time()))
         s.commit()
     if is_htmx(request):
         return _changed(Response("", status_code=200))  # Zeile verschwindet

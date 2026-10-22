@@ -20,8 +20,23 @@ def format_time(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else "–"
 
 
+def format_size(size: int | None) -> str:
+    """Dateigröße lesbar mit deutschem Dezimalkomma (1024er-Schritte)."""
+    if size is None:
+        return "–"
+    value = float(size)
+    for unit in ("Byte", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            break
+        value /= 1024
+    if unit == "Byte":
+        return f"{int(value)} Byte"
+    return f"{value:.1f}".replace(".", ",") + f" {unit}"
+
+
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 templates.env.filters["zeit"] = format_time
+templates.env.filters["groesse"] = format_size
 templates.env.globals.update(
     AUTO_LEVELS=AUTO_LEVELS, ROLES=ROLES, MEDIA_TYPES=MEDIA_TYPES,
     JOB_KINDS=JOB_KINDS, JOB_STATUSES=JOB_STATUSES, ACTIONS=ACTIONS,
