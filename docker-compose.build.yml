@@ -1,0 +1,5 @@
+# Für Entwickler: baut das Image aus diesem Repository statt es aus GHCR zu holen.
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  mediasort:
+    build: .

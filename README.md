@@ -90,6 +90,7 @@ mkdir -p /opt/mediasort/config && cd /opt/mediasort
 chown 1000:1000 config                # PUID:PGID, der Container schreibt dort
 # docker-compose.yml aus diesem Repository hierher kopieren
 printf 'PUID=1000\nPGID=1000\n' > .env
+docker compose pull
 docker compose up -d
 ```
 
@@ -205,5 +206,9 @@ pip install -e '.[test]'      # ffmpeg (ffprobe) muss installiert sein
 pytest -q -W error
 ```
 
-Das Image lässt sich lokal mit `docker build -t mediasort:test .` bauen. Die
-Compose-Datei dieses Repositories baut es mit `docker compose build` selbst.
+Das Image lässt sich lokal mit `docker build -t mediasort:test .` bauen. Mit der
+Override-Datei `docker-compose.build.yml` baut Compose es selbst:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
