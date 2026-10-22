@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, Ignored, Item, Scan, casefold
-from mediasort.library import LibraryIndex, ShowVideo, movie_versions, show_videos
+from mediasort.library import LibraryIndex, LibraryUnreadable, ShowVideo, movie_versions, show_videos
 from mediasort.matcher import match
 from mediasort.mediainfo import ProbeError
 from mediasort.models import (
@@ -250,7 +250,10 @@ class _Run:
         index = self._indexes.get((library.id, index_kind))
         if index is None:
             index = LibraryIndex(self.ctx.session_factory, library.id, Path(library.path), index_kind)
-            index.refresh()
+            try:
+                index.refresh()
+            except LibraryUnreadable as exc:
+                raise RootMissing(str(exc)) from exc
             self._indexes[(library.id, index_kind)] = index
         return index
 

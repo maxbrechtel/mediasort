@@ -28,6 +28,10 @@ EXTRAS_DIRS = frozenset({"extras", "featurettes", "trailers", "behind the scenes
                          "interviews", "scenes", "shorts", "other"})
 
 
+class LibraryUnreadable(Exception):
+    """Der Bibliotheksordner kann nicht gelesen werden; der Index bleibt unverändert (Meldung auf Deutsch)."""
+
+
 def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
@@ -169,11 +173,14 @@ class LibraryIndex:
         )
 
     def refresh(self) -> int:
-        """Ersetzt die Einträge der Bibliothek; bekannte ``tmdb_id`` bleibt bei unverändertem Pfad."""
+        """Ersetzt die Einträge der Bibliothek; bekannte ``tmdb_id`` bleibt bei unverändertem Pfad.
+
+        Ist der Ordner nicht lesbar, bleibt der Index wie er ist: ``LibraryUnreadable``.
+        """
         try:
             folders = sorted(p for p in self._root.iterdir() if p.is_dir() and not p.name.startswith("."))
-        except OSError:
-            folders = []
+        except OSError as exc:
+            raise LibraryUnreadable(f"Bibliothek nicht lesbar: {self._root} ({exc.strerror or exc})") from exc
         with self._session_factory() as session:
             old = session.scalars(select(LibraryEntry).where(LibraryEntry.library_id == self._library_id)).all()
             known = {e.path: e.tmdb_id for e in old}

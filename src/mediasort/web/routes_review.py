@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from mediasort.db import Folder, Ignored, Item
 from mediasort.models import Confidence, ItemStatus, MediaInfo, MediaKind
-from mediasort.planner import ItemNotFound, NotReplannable, mediainfo_from_json
+from mediasort.planner import ItemNotFound, NotReplannable, RootMissing, mediainfo_from_json
 from mediasort.quality import (
     audio_codec_label,
     languages_tag,
@@ -539,7 +539,7 @@ def _replan(request: Request, item_id: int, **overrides) -> tuple[int, str | Non
         raise HTTPException(404, "Vorschlag nicht gefunden") from None
     except TmdbError as exc:
         return 502, str(exc)
-    except NotReplannable as exc:
+    except (NotReplannable, RootMissing) as exc:
         return 409, str(exc)
     return 200, None
 

@@ -729,3 +729,33 @@ def test_replan_keeps_conflict_with_open_item_of_other_scan(env):
     [second] = env.plan("Downloads").items()
     replan_item(env.ctx, second.id)
     assert env.item(second.id).conflict_json["existing"] == [str(first_src)]
+
+
+# --- Abschlussprüfung I3: nicht lesbare Bibliothek ------------------------------------------
+
+
+def _unreadable(monkeypatch, folder: Path) -> None:
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self == folder:
+            raise PermissionError(13, "Keine Berechtigung", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+
+
+def test_unreadable_library_fails_scan_and_keeps_index(env, monkeypatch):
+    env.file("Filme_2D/Matrix (1999)/Matrix (1999) 720p.mkv")
+    env.file("Downloads/The.Matrix.1999/m.mkv")
+    env.plan("Downloads")
+    with env.sm() as s:
+        s.query(Item).delete()
+        s.commit()
+    _unreadable(monkeypatch, env.root / "Filme_2D")
+    with pytest.raises(RootMissing, match="Filme_2D"):
+        env.plan("Downloads")
+    with env.sm() as s:
+        scans = s.scalars(select(Scan).order_by(Scan.id)).all()
+        entry = s.scalars(select(LibraryEntry).where(LibraryEntry.path == env.p("Filme_2D/Matrix (1999)"))).one()
+    assert scans[-1].status == "error" and entry.tmdb_id == 603

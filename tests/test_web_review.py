@@ -677,3 +677,19 @@ def test_batch_conflict_heading_names_this_scan(client, env):
     t = client.get("/review").text
     assert "Konflikt: dieser Titel liegt bereits in diesem Scan vor" in t
     assert "liegt schon in der Bibliothek" not in t
+
+
+def test_replan_with_unreadable_library_is_409(client, planned, monkeypatch):
+    # Abschlussprüfung I3: Bibliothek nicht lesbar -> verständliche Meldung statt Serverfehler
+    env = client.env
+    matrix = env.item(MATRIX_FILE)
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self == env.media / "Filme_2D":
+            raise PermissionError(13, "Keine Berechtigung", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    r = client.post(f"/items/{matrix.id}/replan", headers=HX)
+    assert r.status_code == 409 and "Bibliothek nicht lesbar" in r.text

@@ -183,9 +183,19 @@ def test_refresh_does_not_touch_other_libraries(lib, session):
     assert session.query(LibraryEntry).filter_by(library_id=other.id).count() == 1
 
 
-def test_refresh_missing_root_is_empty(lib):
+def test_refresh_unreadable_root_raises_and_keeps_index(lib):
+    # Abschlussprüfung I3: eine nicht lesbare Bibliothek darf den Index (samt gemerkter IDs) nicht leeren
+    from mediasort.library import LibraryUnreadable
+
     sm, lib_id, root = lib
-    assert LibraryIndex(sm, lib_id, root / "weg").refresh() == 0
+    mk(root, "Greenland (2020)/a.mkv")
+    index = make_index(lib)
+    index.refresh()
+    index.remember(root / "Greenland (2020)", 524047)
+    with pytest.raises(LibraryUnreadable, match="Bibliothek nicht lesbar"):
+        LibraryIndex(sm, lib_id, root / "weg").refresh()
+    with sm() as s:
+        assert [(e.path, e.tmdb_id) for e in s.query(LibraryEntry).all()] == [(str(root / "Greenland (2020)"), 524047)]
 
 
 def test_remember_makes_folder_findable_by_id(lib):
