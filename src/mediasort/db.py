@@ -40,6 +40,7 @@ class Scan(Base):
     subset: Mapped[str | None] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="running")
     auto: Mapped[bool] = mapped_column(default=False)
+    errors_json: Mapped[Any | None] = mapped_column(JSON)  # Meldungen zu nicht lesbaren Pfaden
 
 
 class Item(Base):
