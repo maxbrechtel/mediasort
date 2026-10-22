@@ -94,3 +94,7 @@ def test_better_german_audio_beats_no_german():
 def test_better_unknown_info_gives_no_suggestion():
     assert better((None, 5), (MI(1920, 1080, "h264", None, []), 1)) is None
     assert better((MI(1920, 1080, "h264", None, []), 1), (None, 5)) is None
+
+
+def test_avc_is_h264():
+    assert video_codec_label("avc") == "h264" and video_codec_label("AVC") == "h264"

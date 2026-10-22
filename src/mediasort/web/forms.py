@@ -124,11 +124,16 @@ def _choice(form: FormData, name: str, allowed: Collection[str], label: str, def
     return value
 
 
+def _small_number(raw: str) -> bool:
+    """ASCII-Ziffern, höchstens 9 Stellen (passt in eine Datenbank-ID, kein Riesen-``int``)."""
+    return raw.isascii() and raw.isdecimal() and len(raw) <= 9
+
+
 def _target(form: FormData, name: str, library_ids: Collection[int]) -> int | None:
     raw = str(form.get(name, "")).strip()
     if not raw:
         return None
-    if not raw.isdigit() or int(raw) not in library_ids:
+    if not _small_number(raw) or int(raw) not in library_ids:
         raise FormError("Als Ziel kann nur ein Bibliotheksordner gewählt werden")
     return int(raw)
 
@@ -175,7 +180,7 @@ def overlap_error(path: str, others: Iterable[str]) -> str | None:
 
 
 def _int_between(raw: str, label: str, minimum: int, maximum: int) -> int:
-    number = int(raw) if raw.isascii() and raw.isdigit() else None
+    number = int(raw) if _small_number(raw) else None
     if number is None or not minimum <= number <= maximum:
         raise FormError(f"„{label}“ muss eine ganze Zahl von {minimum} bis {maximum} sein")
     return number
@@ -198,7 +203,7 @@ def parse_correction_form(form: FormData) -> dict:
     raw_episodes = str(form.get("episodes", "")).strip()
     if raw_episodes:
         parts = [p.strip() for p in raw_episodes.split(",") if p.strip()]
-        if not parts or not all(p.isascii() and p.isdigit() and 1 <= int(p) <= MAX_EPISODE for p in parts):
+        if not parts or not all(_small_number(p) and 1 <= int(p) <= MAX_EPISODE for p in parts):
             raise FormError(f"„Folgen“ bitte als Nummern von 1 bis {MAX_EPISODE} mit Komma angeben (z. B. 1, 2)")
         episodes = sorted({int(p) for p in parts})
     format_3d = str(form.get("format_3d", "")).strip() or None

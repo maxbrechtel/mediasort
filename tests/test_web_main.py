@@ -705,3 +705,74 @@ def test_scan_accepts_only_input_folders(client, media_tree):
     assert r.status_code == 400 and "Bibliothek prüfen" in r.text
     with client.app.state.sf() as s:
         assert s.scalar(select(func.count(Job.id))) == 0
+
+
+# --- Abschlussprüfung, kleinere Punkte --------------------------------------------------------
+
+
+def test_cross_site_post_is_rejected(client):
+    for headers in ({"Origin": "http://evil.example"}, {"Origin": "null"},
+                    {"Referer": "http://evil.example/seite"}, {"Origin": "http://testserver:8081"}):
+        r = client.post("/settings", data=SETTINGS_FORM, headers=headers, follow_redirects=False)
+        assert r.status_code == 403 and "fremden Seite" in r.text
+    assert client.env.load().tmdb_key == ""
+    assert client.get("/settings", headers={"Origin": "http://evil.example"}).status_code == 200
+
+
+def test_same_origin_post_is_allowed(client):
+    for headers in ({"Origin": "http://testserver"}, {"Origin": "http://testserver:80"},
+                    {"Referer": "http://testserver/settings"}, {}):
+        r = client.post("/settings", data=SETTINGS_FORM, headers=headers, follow_redirects=False)
+        assert r.status_code == 303
+
+
+def test_same_origin_check_handles_ports_and_proxies():
+    from mediasort.web.app import same_origin
+
+    assert same_origin("http://nas:8080", "nas:8080")
+    assert same_origin("https://media.example", "media.example")  # TLS-Proxy: Host ohne Port
+    assert same_origin("http://[::1]:8080", "[::1]:8080")
+    assert not same_origin("http://nas:8080", "nas:8090")
+    assert not same_origin("http://other:8080", "nas:8080")
+    assert not same_origin("null", "nas:8080") and not same_origin("http://nas:x", "nas:8080")
+
+
+def test_stale_running_scans_are_marked_on_startup(tmp_path):
+    app = create_app(tmp_path / "config", start_background=False)
+    with app.state.sf() as s:
+        s.add_all([Scan(status="running", errors_json=["Ordner nicht lesbar: /x"]), Scan(status="done")])
+        s.commit()
+    with TestClient(app):
+        with app.state.sf() as s:
+            stale, done = s.scalars(select(Scan).order_by(Scan.id)).all()
+    assert stale.status == "error" and stale.finished is not None
+    assert stale.errors_json == ["Ordner nicht lesbar: /x", "abgebrochen (Neustart)"]
+    assert done.status == "done"
+
+
+@pytest.mark.parametrize("number", [2**31, 2**63, 10**30])
+def test_huge_ids_are_404(client, number):
+    assert client.post(f"/scan/{number}", follow_redirects=False).status_code == 404
+    assert client.post(f"/settings/folders/{number}", data={}, follow_redirects=False).status_code == 404
+    assert client.post(f"/settings/folders/{number}/delete", follow_redirects=False).status_code == 404
+    for action in ("toggle", "ignore", "replan"):
+        assert client.post(f"/items/{number}/{action}", follow_redirects=False).status_code == 404
+    assert client.post(f"/items/{number}/decision", data={"decision": "skip"}).status_code == 404
+    assert client.post(f"/items/{number}/correct", data={}).status_code == 404
+    assert client.get(f"/items/{number}/correct").status_code == 404
+    assert client.get(f"/items/{number}/search", params={"q": "x"}).status_code == 404
+
+
+def test_folder_target_and_correction_numbers_reject_huge_values():
+    from starlette.datastructures import FormData
+
+    from mediasort.web.forms import parse_correction_form, parse_folder_options
+
+    for raw in ("9" * 5000, "²", "1234567890"):
+        with pytest.raises(FormError):
+            parse_folder_options(FormData({"movie_target_id": raw}), "input", {1})
+    for field in ("season", "episodes"):
+        with pytest.raises(FormError):
+            parse_correction_form(FormData({field: "9" * 5000}))
+    with pytest.raises(FormError):
+        parse_correction_form(FormData({"episodes": "1, " + "9" * 5000}))

@@ -31,7 +31,7 @@ from mediasort.web.forms import (
     parse_correction_form,
 )
 from mediasort.web.routes_admin import Form
-from mediasort.web.routes_main import BUSY, job_fragment, latest_job
+from mediasort.web.routes_main import BUSY, check_id, job_fragment, latest_job
 from mediasort.web.templating import is_htmx, render
 
 router = APIRouter()
@@ -384,6 +384,7 @@ def group_rows(rows: Sequence[Row], roots: Sequence[Path], season_label: str) ->
 
 
 def _load(s: Session, item_id: int) -> Item:
+    check_id(item_id, "Vorschlag nicht gefunden")
     item = s.get(Item, item_id)
     if item is None:
         raise HTTPException(404, "Vorschlag nicht gefunden")

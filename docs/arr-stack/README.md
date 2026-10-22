@@ -92,6 +92,22 @@ mount -a
 ls /media        # Downloads  Filme_2D  Filme_3D  Serien
 ```
 
+**Docker erst nach der Einbindung starten.** Startet Docker beim Hochfahren der VM
+vor der Einbindung, sieht der Container nur den leeren Ordner `/media` – und
+behält diese Sicht, auch wenn die Freigabe danach eingebunden wird. Deshalb
+Docker an die Einbindung koppeln:
+
+```bash
+mkdir -p /etc/systemd/system/docker.service.d
+printf '[Unit]\nRequiresMountsFor=/media\nAfter=remote-fs.target\n' \
+  > /etc/systemd/system/docker.service.d/media-mount.conf
+systemctl daemon-reload
+```
+
+Wurde die Freigabe doch erst nach dem Start der Container eingebunden (z. B. von
+Hand mit `mount -a`), die Container danach neu starten (`docker compose restart`
+im Ordner der Compose-Datei).
+
 Ordner für SABnzbd anlegen:
 
 ```bash

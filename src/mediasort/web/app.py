@@ -7,18 +7,22 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mediasort import mediainfo, plex
 from mediasort.db import DbCache, Folder, Item, Scan, init_db, make_engine
 from mediasort.executor import execute
-from mediasort.jobs import JobRunner
+from mediasort.jobs import ABORTED, JobRunner
 from mediasort.models import Candidate, MediaInfo, MediaKind
 from mediasort.planner import PlanContext, plan_folder, replan_item
 from mediasort.plex import PlexClient, refresh_touched
@@ -30,6 +34,59 @@ from mediasort.web import routes_admin, routes_main, routes_review
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+CROSS_SITE = "Anfrage von einer fremden Seite abgelehnt."
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _host_port(netloc: str, default_port: int | None) -> tuple[str, int | None] | None:
+    try:
+        split = urlsplit(f"//{netloc}")
+        return (split.hostname or "").lower(), split.port or default_port
+    except ValueError:  # ungültiger Port
+        return None
+
+
+def same_origin(source: str, host: str) -> bool:
+    """Stimmen Rechner und Port von ``Origin``/``Referer`` mit dem ``Host`` der Anfrage überein?
+
+    Ohne Port gilt der Standardport des Schemas von ``source`` – auch für ``Host`` (Browser
+    schicken ihn passend zur aufgerufenen Adresse, z. B. hinter einem TLS-Proxy).
+    """
+    split = urlsplit(source)
+    if split.scheme not in _DEFAULT_PORTS or not split.netloc:
+        return False  # z. B. „null“
+    default = _DEFAULT_PORTS[split.scheme]
+    mine = _host_port(split.netloc, default)
+    theirs = _host_port(host, default)
+    return mine is not None and mine == theirs and bool(mine[0])
+
+
+class SameOriginMiddleware:
+    """Schutz gegen Anfragen fremder Seiten (CSRF): Schreibende Anfragen mit ``Origin`` bzw.
+    ``Referer`` eines anderen Rechners oder Ports werden mit 403 abgelehnt. Ohne beide Kopfzeilen
+    (curl, Tests) wird die Anfrage angenommen."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] not in _SAFE_METHODS:
+            headers = Headers(scope=scope)
+            source = headers.get("origin") or headers.get("referer")
+            if source is not None and not same_origin(source, headers.get("host", "")):
+                await PlainTextResponse(CROSS_SITE, status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def abort_stale_scans(session_factory: Callable[[], Session], now: Callable[[], float]) -> None:
+    """Scans, die beim letzten Beenden noch liefen, gelten als abgebrochen (wie Aufträge)."""
+    with session_factory() as s:
+        for scan in s.scalars(select(Scan).where(Scan.status == "running")):
+            scan.status, scan.finished = "error", now()
+            scan.errors_json = [*(scan.errors_json or []), ABORTED]
+        s.commit()
 
 
 class Services:
@@ -224,6 +281,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        abort_stale_scans(sf, time.time)
         runner.start()
         app.state.poll_task = None
         if start_background:
@@ -247,6 +305,7 @@ def create_app(
     app.state.watcher = watcher
     app.state.services = services
     app.state.poll_task = None
+    app.add_middleware(SameOriginMiddleware)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(routes_main.router)
     app.include_router(routes_admin.router)

@@ -26,7 +26,16 @@ from mediasort.web.forms import (
     settings_form_values,
     submitted_values,
 )
-from mediasort.web.routes_main import BUSY, NOTICES, OVERVIEW_PLEX_TIMEOUT_S, job_fragment, latest_job
+from mediasort.web.routes_main import (
+    BUSY,
+    FOLDER_NOT_FOUND,
+    MAX_ID,
+    NOTICES,
+    OVERVIEW_PLEX_TIMEOUT_S,
+    check_id,
+    job_fragment,
+    latest_job,
+)
 from mediasort.web.templating import is_htmx, render
 
 router = APIRouter()
@@ -105,10 +114,11 @@ def add_folder(request: Request, form: Form):
 @router.post("/settings/folders/{folder_id}")
 def edit_folder(request: Request, folder_id: int, form: Form):
     """Typ, Automatik-Stufe und Ziele ändern; Pfad und Rolle bleiben, offene Vorschläge auch."""
+    check_id(folder_id, FOLDER_NOT_FOUND)
     with request.app.state.sf() as s:
         folder = s.get(Folder, folder_id)
         if folder is None:
-            raise HTTPException(404, "Ordner nicht gefunden")
+            raise HTTPException(404, FOLDER_NOT_FOUND)
         try:
             options = parse_folder_options(form, folder.role, _library_ids(s))
             if error := overlap_error(folder.path, s.scalars(select(Folder.path).where(Folder.id != folder.id))):
@@ -144,9 +154,10 @@ def delete_folder(s: Session, folder_id: int) -> bool:
 
 @router.post("/settings/folders/{folder_id}/delete")
 def remove_folder(request: Request, folder_id: int):
+    check_id(folder_id, FOLDER_NOT_FOUND)
     with request.app.state.sf() as s:
         if s.get(Folder, folder_id) is None:
-            raise HTTPException(404, "Ordner nicht gefunden")
+            raise HTTPException(404, FOLDER_NOT_FOUND)
         if request.app.state.runner.busy():
             return _settings_page(request, status_code=409, folder_error=BUSY_FOLDERS)
         delete_folder(s, folder_id)
@@ -191,7 +202,6 @@ PLEX_UNREACHABLE = ("Plex ist nicht erreichbar; ob der Papierkorb automatisch ge
 LIBRARY_NOTICES = {**NOTICES, "plex": PLEX_UNREACHABLE}
 RECENT_LIBRARY_SCANS = 10
 HISTORY_PAGE_SIZE = 100
-MAX_ID = 2**31 - 1
 _LETTER_ERROR = "Bitte je einen Buchstaben (A–Z) oder die Ziffer 0 angeben."
 
 

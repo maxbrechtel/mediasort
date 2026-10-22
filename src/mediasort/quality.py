@@ -8,6 +8,7 @@ from mediasort.models import AudioStream, MediaInfo
 
 _VIDEO_LABELS = {
     "h264": "h264",
+    "avc": "h264",
     "hevc": "h265",
     "av1": "av1",
     "vp9": "vp9",

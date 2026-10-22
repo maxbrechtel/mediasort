@@ -372,20 +372,20 @@ class _Run:
         found: dict[str, _Version | None] = {}
         coverage: dict[str, tuple[int, ...]] = {}  # Folgennummern vorhandener Folgen-Dateien
         title_only = False
-        for match in index.find_matches(cand):
-            if not match.title_only:  # eine nur über den Titel geratene ID wird nicht gemerkt
-                index.remember(match.path, cand.tmdb_id)
+        for hit in index.find_matches(cand):
+            if not hit.title_only:  # eine nur über den Titel geratene ID wird nicht gemerkt
+                index.remember(hit.path, cand.tmdb_id)
             if kind == MediaKind.MOVIE:
-                files = movie_versions(match.path, self.ctx.settings.sample_bytes)
+                files = movie_versions(hit.path, self.ctx.settings.sample_bytes)
             else:
                 files = []
-                for video in self.show_videos(match.path):
+                for video in self.show_videos(hit.path):
                     if video.season == season and set(episodes).intersection(video.episodes):
                         files.append(video.path)
                         coverage[str(video.path)] = video.episodes
             for path in files:
                 found.setdefault(str(path), None)
-            title_only = title_only or (match.title_only and bool(files))
+            title_only = title_only or (hit.title_only and bool(files))
         if _exists(target):
             found.setdefault(str(target), None)
         for key in (str(target), *_identities(kind, cand.tmdb_id, season, episodes, library.path)):

@@ -18,12 +18,21 @@ router = APIRouter()
 
 BUSY = "Es läuft bereits ein Auftrag. Bitte warten, bis er fertig ist."
 NOTICES = {"busy": BUSY}
+FOLDER_NOT_FOUND = "Ordner nicht gefunden"
 NOT_INPUT = ("Hier können nur Eingangsordner gescannt werden. Bibliotheken bitte über "
              "„Bibliothek prüfen“ prüfen (mit Warnung zum Plex-Papierkorb).")
 _OPEN = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
 RECENT_ACTIONS = 5
 OVERVIEW_PLEX_TIMEOUT_S = 3.0  # die Übersicht soll bei Plex-Ausfall nicht hängen
 _FINISHED = ("done", "error")
+MAX_ID = 2**31 - 1
+
+
+def check_id(value: int, message: str) -> int:
+    """Pfad-IDs außerhalb von 1 … 2³¹−1 gibt es nicht (404 statt Datenbankfehler)."""
+    if not 0 < value <= MAX_ID:
+        raise HTTPException(404, message)
+    return value
 
 
 @dataclass
@@ -101,10 +110,11 @@ def overview(request: Request, hinweis: str = ""):
 @router.post("/scan/{folder_id}")
 def start_scan(request: Request, folder_id: int):
     state = request.app.state
+    check_id(folder_id, FOLDER_NOT_FOUND)
     with state.sf() as s:
         folder = s.get(Folder, folder_id)
         if folder is None:
-            raise HTTPException(404, "Ordner nicht gefunden")
+            raise HTTPException(404, FOLDER_NOT_FOUND)
         if folder.role != "input":
             raise HTTPException(400, NOT_INPUT)
     job_id = state.runner.submit("scan", lambda job_id, progress: state.services.scan_folder(folder_id))
