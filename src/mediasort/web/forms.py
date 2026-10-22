@@ -1,11 +1,13 @@
 """Formulare der Einstellungsseite und der Korrektur: Werte darstellen und Eingaben prüfen (Meldungen auf Deutsch)."""
 
-from collections.abc import Collection, Mapping
+import posixpath
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import replace
 from pathlib import PurePosixPath
 
 from starlette.datastructures import FormData
 
+from mediasort.db import casefold
 from mediasort.models import AutoLevel, FolderType
 from mediasort.settings import Settings
 from mediasort.tmdb import TmdbClient
@@ -152,8 +154,24 @@ def parse_folder_form(form: FormData, library_ids: Collection[int]) -> dict:
     if not raw_path.startswith("/"):
         raise FormError("Bitte einen absoluten Pfad angeben (beginnt mit /)")
     role = _choice(form, "role", ROLES, "Rolle", "input")
-    return {"path": str(PurePosixPath(raw_path)), "role": role,
+    return {"path": posixpath.normpath(raw_path), "role": role,
             **parse_folder_options(form, role, library_ids)}
+
+
+def _folder_key(path: str) -> PurePosixPath:
+    """Vergleichsform eines Ordnerpfads: normalisiert und ohne Groß-/Kleinschreibung (SMB)."""
+    return PurePosixPath(casefold(posixpath.normpath(path)))
+
+
+def overlap_error(path: str, others: Iterable[str]) -> str | None:
+    """Meldung, wenn ``path`` in einem der ``others`` liegt oder einen davon enthält (Abschlussprüfung I4)."""
+    mine = _folder_key(path)
+    for other in others:
+        theirs = _folder_key(other)
+        if mine == theirs or mine.is_relative_to(theirs) or theirs.is_relative_to(mine):
+            return (f"Der Ordner {path} überschneidet sich mit dem eingetragenen Ordner {other} – "
+                    "Eingangs- und Bibliotheksordner dürfen nicht ineinander liegen.")
+    return None
 
 
 def _int_between(raw: str, label: str, minimum: int, maximum: int) -> int:

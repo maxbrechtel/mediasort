@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from conftest import A, MI
 from mediasort.db import FileState, Folder, History, Item, Job, Scan
@@ -665,3 +665,43 @@ def test_folder_changes_refused_while_busy(client):
 
 def test_delete_button_asks_for_confirmation(client):
     assert 'onsubmit="return confirm(' in client.get("/settings").text
+
+
+# --- Abschlussprüfung I4: Ordner dürfen nicht ineinander liegen ------------------------------
+
+FOLDER_FORM = {"role": "input", "media_type": "auto", "auto_level": "off"}
+
+
+@pytest.mark.parametrize("rel", ["", "Downloads/Neu", "Filme_2D/Unterordner", "downloads/neu", "Serien/../Serien/X"])
+def test_overlapping_folder_is_rejected(client, rel):
+    path = str(client.env.media / rel) if rel else str(client.env.media)
+    for role in ("input", "library"):
+        r = client.post("/settings/folders", data={**FOLDER_FORM, "role": role, "path": path})
+        assert r.status_code == 400 and "überschneidet sich" in r.text
+    with client.app.state.sf() as s:
+        assert s.scalar(select(func.count(Folder.id))) == 4
+
+
+def test_sibling_folder_is_accepted(client):
+    r = client.post("/settings/folders", data={**FOLDER_FORM, "path": str(client.env.media / "Downloads2")},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_editing_overlapping_folder_is_rejected(client):
+    with client.app.state.sf() as s:
+        inner = Folder(path=str(client.env.media / "Downloads" / "Teil"), role="input", media_type="auto")
+        s.add(inner)
+        s.commit()
+        inner_id = inner.id
+    r = client.post(f"/settings/folders/{inner_id}", data={**FOLDER_FORM, "media_type": "movie"})
+    assert r.status_code == 400 and "überschneidet sich" in r.text
+    with client.app.state.sf() as s:
+        assert s.get(Folder, inner_id).media_type == "auto"
+
+
+def test_scan_accepts_only_input_folders(client, media_tree):
+    r = client.post(f"/scan/{client.env.filme_id}", follow_redirects=False)
+    assert r.status_code == 400 and "Bibliothek prüfen" in r.text
+    with client.app.state.sf() as s:
+        assert s.scalar(select(func.count(Job.id))) == 0

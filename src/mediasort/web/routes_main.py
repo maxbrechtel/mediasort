@@ -18,6 +18,8 @@ router = APIRouter()
 
 BUSY = "Es läuft bereits ein Auftrag. Bitte warten, bis er fertig ist."
 NOTICES = {"busy": BUSY}
+NOT_INPUT = ("Hier können nur Eingangsordner gescannt werden. Bibliotheken bitte über "
+             "„Bibliothek prüfen“ prüfen (mit Warnung zum Plex-Papierkorb).")
 _OPEN = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
 RECENT_ACTIONS = 5
 OVERVIEW_PLEX_TIMEOUT_S = 3.0  # die Übersicht soll bei Plex-Ausfall nicht hängen
@@ -100,8 +102,11 @@ def overview(request: Request, hinweis: str = ""):
 def start_scan(request: Request, folder_id: int):
     state = request.app.state
     with state.sf() as s:
-        if s.get(Folder, folder_id) is None:
+        folder = s.get(Folder, folder_id)
+        if folder is None:
             raise HTTPException(404, "Ordner nicht gefunden")
+        if folder.role != "input":
+            raise HTTPException(400, NOT_INPUT)
     job_id = state.runner.submit("scan", lambda job_id, progress: state.services.scan_folder(folder_id))
     notice = BUSY if job_id is None else None
     if is_htmx(request):

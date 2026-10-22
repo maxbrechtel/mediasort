@@ -19,6 +19,7 @@ from mediasort.scanner import letter_range
 from mediasort.settings import load_settings, save_settings
 from mediasort.web.forms import (
     FormError,
+    overlap_error,
     parse_folder_form,
     parse_folder_options,
     parse_settings_form,
@@ -92,6 +93,8 @@ def add_folder(request: Request, form: Form):
             fields = parse_folder_form(form, _library_ids(s))
             if s.scalars(select(Folder).where(Folder.path == fields["path"])).first() is not None:
                 raise FormError(f"Der Ordner {fields['path']} ist bereits eingetragen")
+            if error := overlap_error(fields["path"], s.scalars(select(Folder.path))):
+                raise FormError(error)
         except FormError as exc:
             return _settings_page(request, status_code=400, folder_error=str(exc))
         s.add(Folder(**fields))
@@ -108,6 +111,8 @@ def edit_folder(request: Request, folder_id: int, form: Form):
             raise HTTPException(404, "Ordner nicht gefunden")
         try:
             options = parse_folder_options(form, folder.role, _library_ids(s))
+            if error := overlap_error(folder.path, s.scalars(select(Folder.path).where(Folder.id != folder.id))):
+                raise FormError(error)
         except FormError as exc:
             return _settings_page(request, status_code=400, folder_error=str(exc))
         targets_change = any(getattr(folder, c) != options[c] for c in _TARGET_COLUMNS)
