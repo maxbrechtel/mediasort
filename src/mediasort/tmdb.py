@@ -23,7 +23,14 @@ _IMDB_ID = re.compile(r"\b(tt\d{7,})\b")
 
 
 class TmdbError(Exception):
-    """Fehler bei der Kommunikation mit TMDB (Meldung auf Deutsch)."""
+    """Fehler bei der Kommunikation mit TMDB (Meldung auf Deutsch).
+
+    ``status_code`` ist der HTTP-Status einer Fehlerantwort, sonst ``None``.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _endpoint(kind: MediaKind) -> str:
@@ -97,9 +104,9 @@ class TmdbClient:
             self._sleep(self._retry_after(response))
             response = self._send(path, query)
             if response.status_code == 429:
-                raise TmdbError("TMDB: Anfragelimit überschritten, bitte später erneut versuchen")
+                raise TmdbError("TMDB: Anfragelimit überschritten, bitte später erneut versuchen", 429)
         if response.status_code >= 400:
-            raise TmdbError(self._http_error_message(response))
+            raise TmdbError(self._http_error_message(response), response.status_code)
         try:
             data = response.json()
         except ValueError as exc:
@@ -168,6 +175,11 @@ class TmdbClient:
         else:
             english = self._get(f"{endpoint}/{tmdb_id}", language=ENGLISH)
         return _candidate(kind, data, _title_of(kind, english))
+
+    def episode_numbers(self, tv_id: int, season: int) -> set[int]:
+        """Alle Folgennummern der Staffel, auch Folgen ohne Namen."""
+        data = self._get(f"tv/{tv_id}/season/{season}", language=self._language)
+        return {int(ep["episode_number"]) for ep in data.get("episodes") or []}
 
     def episode_titles(self, tv_id: int, season: int) -> dict[int, str]:
         path = f"tv/{tv_id}/season/{season}"

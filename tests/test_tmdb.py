@@ -132,6 +132,19 @@ def test_episode_titles_fall_back_to_english(client):
     assert t[2] == "Pferd ohne Namen" and t[3] == "I.F.T."
 
 
+def test_episode_numbers_include_unnamed_episodes(client, calls):
+    assert client.episode_numbers(1396, 3) == {1, 2, 3, 5}
+    client.episode_titles(1396, 3)
+    assert calls["tv/1396/season/3"] == 2  # gleiche Anfrage (de) kommt aus dem Cache, dazu en
+
+
+def test_episode_numbers_errors_raise_tmdb_error_with_status():
+    client = make_client(lambda r: httpx.Response(404, json={}))
+    with pytest.raises(TmdbError, match="404") as exc_info:
+        client.episode_numbers(1, 9)
+    assert exc_info.value.status_code == 404
+
+
 def test_episode_titles_missing_in_both_languages_are_omitted():
     def handler(request):
         return httpx.Response(200, json={"episodes": [
@@ -231,8 +244,9 @@ def test_network_error_raises_tmdb_error():
     def handler(request):
         raise httpx.ConnectError("boom", request=request)
 
-    with pytest.raises(TmdbError, match="TMDB nicht erreichbar"):
+    with pytest.raises(TmdbError, match="TMDB nicht erreichbar") as exc_info:
         make_client(handler).search(MediaKind.MOVIE, "Matrix", None)
+    assert exc_info.value.status_code is None
 
 
 def test_bearer_token_for_long_keys(requests_seen):

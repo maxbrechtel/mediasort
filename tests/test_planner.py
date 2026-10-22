@@ -1,3 +1,4 @@
+import os
 import shutil
 import time
 from collections import Counter
@@ -8,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from conftest import A, MI
-from mediasort.db import Folder, Ignored, Item, LibraryEntry, Scan
+from mediasort.db import DbCache, Folder, Ignored, Item, LibraryEntry, Scan
 from mediasort.mediainfo import ProbeError
 from mediasort.models import MediaKind
 from mediasort.planner import PlanContext, RootMissing, plan_folder, replan_item, target_root
@@ -82,7 +83,8 @@ class Env:
             self.counter[request.url.path.removeprefix("/3/")] += 1
             return handler(request)
 
-        self.tmdb = TmdbClient("key", transport=httpx.MockTransport(counting), sleep=lambda _s: None)
+        self.tmdb = TmdbClient("key", cache=DbCache(sm), transport=httpx.MockTransport(counting),
+                               sleep=lambda _s: None)
         for name in ("Downloads", "Filme_2D", "Filme_3D", "Serien"):
             (root / name).mkdir(parents=True)
         with sm() as s:
@@ -173,7 +175,8 @@ def test_episodes_grouped_one_search(env):
         env.file(f"Downloads/Reacher.S04E0{e}.German.DL.1080P.WEBRip.h265-WOTT/x.mkv")
     items = env.plan("Downloads").items()
     assert len({i.group_key for i in items}) == 1 and env.calls("search/tv") == 2  # de + en
-    assert env.calls("tv/108978/season/4") == 2  # de + en, einmal je Gruppe und Staffel
+    # de (Folgennummern, danach aus dem Cache für die Namen) + en, einmal je Gruppe und Staffel
+    assert env.calls("tv/108978/season/4") == 2
     assert items[0].target.startswith(env.p("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - "))
     assert items[0].target == env.p("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - Kapitel 1 - 1080p [DE+EN].mkv")
     assert [i.confidence for i in items] == ["hoch"] * 3
@@ -203,9 +206,8 @@ def test_same_target_in_batch_becomes_conflict(env):
     env.file("Downloads/Reacher.S04E05.German.DL.HDR.2160p.WEB.h265-W4K/b.mkv", info=UHD_DE)
     items = env.plan("Downloads").items()
     assert items[0].target == items[1].target
-    assert sum(1 for i in items if i.conflict_json) >= 1
-    second = items[1]
-    assert second.conflict_json["existing"] == [items[0].source]
+    assert items[0].conflict_json is None
+    assert items[1].conflict_json["existing"] == [items[0].source]
 
 
 def test_already_correct_file_in_library_mode_has_no_item(env):
@@ -409,3 +411,108 @@ def test_series_folder_without_episode_number_then_corrected(env):
     after = env.item(it.id)
     assert after.note is None and after.status == "new"
     assert after.target == env.p("Serien/Reacher (2022)/Staffel 4/Reacher - S04E02 - Kapitel 2 - 1080p [DE+EN].mkv")
+
+
+# --- Nachbesserung Runde 1 --------------------------------------------------------
+
+
+def handler_with(overrides):
+    """TMDB-Fixtures, bei denen einzelne Pfade durch eigene Antworten ersetzt sind."""
+    def handler(request):
+        path = request.url.path.removeprefix("/3/")
+        if path in overrides:
+            return overrides[path](request)
+        return tmdb_handler(request)
+    return handler
+
+
+@pytest.fixture
+def make_env(tmp_path, sessionmaker_):
+    envs = []
+
+    def make(handler):
+        envs.append(Env(tmp_path / "media", sessionmaker_, handler))
+        return envs[-1]
+
+    yield make
+    for e in envs:
+        e.tmdb.close()
+
+
+def test_unknown_season_is_not_high_and_explains(env):
+    env.file("Downloads/Reacher.S09E01.German.DL.1080P.WEBRip.h265-WOTT/x.mkv")
+    it = env.plan("Downloads").items()[0]
+    assert it.confidence == "niedrig"
+    assert it.error == "Staffel 9 bei TMDB nicht gefunden" and it.status == "new"
+
+
+def test_season_lookup_failure_caps_confidence_at_medium(make_env):
+    def down(request):
+        raise httpx.ConnectError("Verbindung abgelehnt", request=request)
+
+    env = make_env(handler_with({"tv/108978/season/4": down}))
+    env.file("Downloads/Reacher.S04E01.German.DL.1080P.WEBRip.h265-WOTT/x.mkv")
+    it = env.plan("Downloads").items()[0]
+    assert it.confidence == "mittel" and "Staffel 4" in it.error and "TMDB" in it.error
+    assert it.target == env.p("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - 1080p [DE+EN].mkv")
+
+
+def test_unnamed_episode_still_counts_as_existing(make_env):
+    def season(request):
+        eps = [{"episode_number": n, "name": "" if n == 3 else f"Kapitel {n}"} for n in range(1, 9)]
+        return httpx.Response(200, json={"season_number": 4, "episodes": eps})
+
+    env = make_env(handler_with({"tv/108978/season/4": season}))
+    env.file("Downloads/Reacher.S04E03.German.DL.1080P.WEBRip.h265-WOTT/x.mkv")
+    it = env.plan("Downloads").items()[0]
+    assert it.confidence == "hoch" and it.error is None
+    assert it.target == env.p("Serien/Reacher (2022)/Staffel 4/Reacher - S04E03 - 1080p [DE+EN].mkv")
+
+
+def test_same_movie_in_batch_with_different_names_is_conflict(env):
+    env.file("Downloads/The.Matrix.1999.1080p/a.mkv")
+    env.file("Downloads/The.Matrix.1999.2160p/b.mkv", info=MI(3840, 2160, "hevc", "DV", [A("truehd", "de", 8)]))
+    first, second = env.plan("Downloads").items()
+    assert first.target != second.target
+    assert first.conflict_json is None
+    assert second.conflict_json == {"existing": [first.source], "suggestion": "keep_new"}
+
+
+def test_same_episode_in_batch_with_different_names_is_conflict(env):
+    env.file("Downloads/Reacher.S04E05.German.DL.2160p.DV.HDR.WEBRip.AV1-WOTT/a.mkv", info=UHD_DE)
+    env.file("Downloads/Reacher.S04E05.German.DL.1080p.WEB.h265-W4K/b.mkv")
+    items = env.plan("Downloads").items()
+    assert items[0].target != items[1].target
+    conflicts = [i for i in items if i.conflict_json]
+    assert len(conflicts) == 1
+    other = next(i for i in items if not i.conflict_json)
+    assert conflicts[0].conflict_json["existing"] == [other.source]
+    assert conflicts[0].conflict_json["suggestion"] in ("keep_new", "keep_existing")
+
+
+def test_multi_episode_overlap_in_batch_is_conflict(env):
+    env.file("Downloads/Reacher.S04E05E06.German.DL.1080p.WEB.h265-W4K/a.mkv")
+    env.file("Downloads/Reacher.S04E06.German.DL.720p.WEB.h264-X/b.mkv", info=MI(1280, 720, "h264", None, [A("aac", "de", 2)]))
+    first, second = env.plan("Downloads").items()
+    assert second.conflict_json == {"existing": [first.source], "suggestion": "keep_existing"}
+
+
+def test_unchanged_error_file_is_not_planned_again(env):
+    src = env.file("Downloads/Kaputt.2020/k.mkv", info=ProbeError("ffprobe konnte die Datei nicht lesen"))
+    assert len(env.plan("Downloads").items()) == 1
+    assert env.plan("Downloads").items() == []
+    st = src.stat()
+    os.utime(src, (st.st_atime, st.st_mtime - 3600))
+    assert len(env.plan("Downloads").items()) == 1
+
+
+def test_replan_refuses_done_and_ignored_items(env):
+    env.file("Downloads/The.Matrix.1999/m.mkv")
+    it = env.plan("Downloads").items()[0]
+    for status in ("done", "ignored"):
+        with env.sm() as s:
+            s.get(Item, it.id).status = status
+            s.commit()
+        with pytest.raises(ValueError, match="nicht korrigiert"):
+            replan_item(env.ctx, it.id, tmdb_ref=("movie", "603"))
+    assert env.item(it.id).status == "ignored"

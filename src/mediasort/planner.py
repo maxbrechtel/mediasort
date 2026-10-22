@@ -1,6 +1,6 @@
 """Vorschläge erzeugen: scannen, zerlegen, abgleichen, Zielpfade und Konflikte (Spec 5, 7.1, 7.2, 7.5)."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -36,6 +36,8 @@ SERIES_NOTE = "sieht aus wie eine Serienfolge"
 NO_EPISODE_NOTE = "keine Folgennummer erkannt"
 ALREADY_CORRECT_NOTE = "Datei liegt bereits richtig"
 _OPEN_STATUSES = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
+_REPLANNABLE = (ItemStatus.NEW.value, ItemStatus.ERROR.value, ItemStatus.CONFIRMED.value)
+_CONFIDENCE_ORDER = (Confidence.LOW, Confidence.MEDIUM, Confidence.HIGH)
 _SUGGESTIONS = {"a": "keep_new", "b": "keep_existing"}
 
 
@@ -151,6 +153,33 @@ def _subtitles_from_json(data: list[dict[str, Any]] | None) -> list[Subtitle]:
 # --- Ein Lauf -----------------------------------------------------------------------
 
 
+def _cap_confidence(item: Item, cap: Confidence) -> None:
+    if _CONFIDENCE_ORDER.index(Confidence(item.confidence)) > _CONFIDENCE_ORDER.index(cap):
+        item.confidence = cap.value
+
+
+def _identities(kind: MediaKind, tmdb_id: int, season: int | None, episodes: Sequence[int]) -> list[tuple]:
+    """Schlüssel „derselbe Film“ bzw. „dieselbe Folge“ (je Folgennummer, damit Doppelfolgen überlappen)."""
+    if kind == MediaKind.MOVIE:
+        return [("movie", tmdb_id)]
+    return [("episode", tmdb_id, season, e) for e in episodes]
+
+
+@dataclass(frozen=True)
+class _SeasonCheck:
+    numbers: frozenset[int] | None  # None: Staffel konnte nicht geprüft werden
+    error: str | None = None
+    cap: Confidence | None = None
+
+    def episode_exists(self, episodes: Sequence[int]) -> bool | None:
+        return None if self.numbers is None else all(e in self.numbers for e in episodes)
+
+    def apply(self, item: Item) -> None:
+        if self.error is not None:
+            item.error = self.error
+            _cap_confidence(item, self.cap)
+
+
 class _Run:
     """Zustand eines Planungslaufs: Bibliotheksindizes, Folgennamen und schon vergebene Ziele."""
 
@@ -158,28 +187,60 @@ class _Run:
         self.ctx = ctx
         self.folder = folder
         self.folders = folders
-        self._indexes: dict[int, LibraryIndex] = {}
-        self._episode_names: dict[tuple[int, int], dict[int, str] | None] = {}
-        # Zielpfad -> (Quelle, MediaInfo, Größe) des Items, das ihn in diesem Scan zuerst belegt hat
-        self.claimed: dict[str, tuple[str, MediaInfo | None, int]] = {}
+        self._indexes: dict[tuple[int, str], LibraryIndex] = {}
+        self._seasons: dict[tuple[int, int], _SeasonCheck] = {}
+        self._episode_names: dict[tuple[int, int], dict[int, str]] = {}
+        # Zielpfad oder Identität (siehe ``_identities``) -> (Quelle, MediaInfo, Größe) des Items,
+        # das sie in diesem Scan zuerst belegt hat
+        self.claimed: dict[Hashable, tuple[str, MediaInfo | None, int]] = {}
 
     def index(self, library: Folder, kind: MediaKind) -> LibraryIndex:
-        index = self._indexes.get(library.id)
+        index_kind = "series" if kind == MediaKind.EPISODE else "movie"
+        index = self._indexes.get((library.id, index_kind))
         if index is None:
-            index_kind = "series" if kind == MediaKind.EPISODE else "movie"
             index = LibraryIndex(self.ctx.session_factory, library.id, Path(library.path), index_kind)
             index.refresh()
-            self._indexes[library.id] = index
+            self._indexes[(library.id, index_kind)] = index
         return index
 
-    def episode_names(self, tv_id: int, season: int) -> dict[int, str] | None:
+    def season_check(self, tv_id: int, season: int) -> _SeasonCheck:
+        key = (tv_id, season)
+        if key not in self._seasons:
+            try:
+                check = _SeasonCheck(frozenset(self.ctx.tmdb.episode_numbers(tv_id, season)))
+            except TmdbError as exc:
+                if exc.status_code == 404:
+                    check = _SeasonCheck(None, f"Staffel {season} bei TMDB nicht gefunden", Confidence.LOW)
+                else:
+                    check = _SeasonCheck(
+                        None, f"Staffel {season} konnte bei TMDB nicht geprüft werden: {exc}", Confidence.MEDIUM
+                    )
+            self._seasons[key] = check
+        return self._seasons[key]
+
+    def episode_names(self, tv_id: int, season: int) -> dict[int, str]:
         key = (tv_id, season)
         if key not in self._episode_names:
-            try:
-                self._episode_names[key] = self.ctx.tmdb.episode_titles(tv_id, season)
-            except TmdbError:
-                self._episode_names[key] = None
+            names: dict[int, str] = {}
+            if self.season_check(tv_id, season).numbers is not None:
+                try:
+                    names = self.ctx.tmdb.episode_titles(tv_id, season)
+                except TmdbError:
+                    pass  # Folgennamen sind optional (Spec 5.6)
+            self._episode_names[key] = names
         return self._episode_names[key]
+
+    def claim(
+        self,
+        target: str,
+        kind: MediaKind,
+        tmdb_id: int,
+        season: int | None,
+        episodes: Sequence[int],
+        version: tuple[str, MediaInfo | None, int],
+    ) -> None:
+        for key in (target, *_identities(kind, tmdb_id, season, episodes)):
+            self.claimed.setdefault(key, version)
 
     def place(
         self,
@@ -208,7 +269,7 @@ class _Run:
                 item.note = NO_EPISODE_NOTE
                 item.confidence = Confidence.LOW.value
                 return True
-            names = self.episode_names(cand.tmdb_id, season) or {}
+            names = self.episode_names(cand.tmdb_id, season)
             titles = [names[e] for e in episodes if e in names]
             rel = episode_relpath(cand.title, cand.year, season, episodes, titles, ext, info,
                                   languages, self.ctx.settings.season_label)
@@ -220,7 +281,7 @@ class _Run:
         item.subtitles_json = _subtitles_json(subs, target)
         item.conflict_json = self._conflict(library, cand, kind, season, episodes, source, target,
                                             info, item.size)
-        self.claimed.setdefault(str(target), (str(source), info, item.size))
+        self.claim(str(target), kind, cand.tmdb_id, season, episodes, (str(source), info, item.size))
         return True
 
     def _conflict(
@@ -245,9 +306,10 @@ class _Run:
                 existing.setdefault(str(path), None)
         if target.exists():
             existing.setdefault(str(target), None)
-        claim = self.claimed.get(str(target))
-        if claim is not None:
-            existing[claim[0]] = (claim[1], claim[2])
+        for key in (str(target), *_identities(kind, cand.tmdb_id, season, episodes)):
+            claim = self.claimed.get(key)
+            if claim is not None:
+                existing[claim[0]] = (claim[1], claim[2])
         existing.pop(str(source), None)
         if not existing:
             return None
@@ -336,10 +398,10 @@ def _plan_entry(run: _Run, entry: _Entry, scan_id: int, auto: bool) -> Item | No
 
     result = match(parsed, entry.candidates)
     cand = result.candidate
+    season_check = None
     if cand is not None and kind == MediaKind.EPISODE and parsed.season is not None and parsed.episodes:
-        names = run.episode_names(cand.tmdb_id, parsed.season)
-        exists = None if names is None else all(e in names for e in parsed.episodes)
-        result = match(parsed, entry.candidates, exists)
+        season_check = run.season_check(cand.tmdb_id, parsed.season)
+        result = match(parsed, entry.candidates, season_check.episode_exists(parsed.episodes))
     confidence = result.confidence
     if entry.note or entry.tmdb_error:
         confidence = Confidence.LOW
@@ -348,6 +410,8 @@ def _plan_entry(run: _Run, entry: _Entry, scan_id: int, auto: bool) -> Item | No
     if cand is not None:
         item.tmdb_id, item.title, item.year = cand.tmdb_id, cand.title, cand.year
     item.error = entry.tmdb_error
+    if season_check is not None:
+        season_check.apply(item)
 
     try:
         info = run.ctx.probe(video.path)
@@ -370,6 +434,17 @@ def _plan_entry(run: _Run, entry: _Entry, scan_id: int, auto: bool) -> Item | No
     return item if placed else None
 
 
+def _already_planned(
+    video: VideoFile, planned: set[str], latest: dict[str, tuple[str, int, float]]
+) -> bool:
+    """Offener Vorschlag vorhanden, oder der letzte war ein Fehler und die Datei ist unverändert."""
+    source = str(video.path)
+    if source in planned:
+        return True
+    last = latest.get(source)
+    return last == (ItemStatus.ERROR.value, video.size, video.mtime)
+
+
 def plan_folder(
     ctx: PlanContext,
     folder: Folder,
@@ -382,6 +457,9 @@ def plan_folder(
         folders = {f.id: f for f in s.scalars(select(Folder))}
         ignored = set(s.scalars(select(Ignored.path)))
         planned = set(s.scalars(select(Item.source).where(Item.status.in_(_OPEN_STATUSES))))
+        # jüngstes Item je Quelle: (Status, Größe, Änderungszeit)
+        latest = {row.source: (row.status, row.size, row.mtime) for row in s.execute(
+            select(Item.source, Item.status, Item.size, Item.mtime).order_by(Item.id))}
     _check_roots(folder, folders)
 
     with ctx.session_factory() as s:
@@ -401,7 +479,7 @@ def plan_folder(
             ignored=ignored,
             top_filter=subset,
         )
-        entries = [_entry(v, folder) for v in result.videos if str(v.path) not in planned]
+        entries = [_entry(v, folder) for v in result.videos if not _already_planned(v, planned, latest)]
         _search_groups(ctx, entries)
         run = _Run(ctx, folder, folders)
         items = [it for it in (_plan_entry(run, e, scan_id, auto) for e in entries) if it is not None]
@@ -471,6 +549,8 @@ def _replan(
         item.tmdb_id, item.title, item.year = cand.tmdb_id, cand.title, cand.year
     if corrected:  # Nutzer hat entschieden
         item.note, item.confidence = None, Confidence.HIGH.value
+    if cand is not None and kind == MediaKind.EPISODE and season is not None and episodes:
+        run.season_check(cand.tmdb_id, season).apply(item)
 
     if item.mediainfo_json is not None:
         info = _info_from_json(item.mediainfo_json)
@@ -510,6 +590,8 @@ def replan_item(
         item = s.get(Item, item_id)
         if item is None:
             raise KeyError(f"Vorschlag {item_id} nicht gefunden")
+        if item.status not in _REPLANNABLE:
+            raise ValueError(f"Vorschlag {item_id} kann im Status „{item.status}“ nicht korrigiert werden")
         folders = {f.id: f for f in s.scalars(select(Folder))}
         others = list(s.scalars(select(Item).where(Item.scan_id == item.scan_id, Item.id != item.id)))
 
@@ -525,8 +607,11 @@ def replan_item(
         group = [o for o in others if o.group_key == item.group_key and o.status == ItemStatus.NEW.value]
     run = _Run(ctx, folders[item.folder_id], folders)
     for other in others:
-        if other not in group and other.status in _OPEN_STATUSES and other.target:
-            run.claimed.setdefault(other.target, (other.source, _info_from_json(other.mediainfo_json), other.size))
+        if other not in group and other.status in _OPEN_STATUSES and other.target and other.tmdb_id:
+            run.claim(
+                other.target, MediaKind(other.kind), other.tmdb_id, other.season, other.episodes_json or (),
+                (other.source, _info_from_json(other.mediainfo_json), other.size),
+            )
 
     corrected = tmdb_ref is not None
     _replan(run, item, cand, season=season, episodes=episodes, format_3d=format_3d, corrected=corrected)
