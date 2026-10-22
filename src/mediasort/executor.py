@@ -17,7 +17,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from mediasort.db import Folder, History, Item
+from mediasort.db import Folder, History, Item, casefold
 from mediasort.models import ItemStatus
 from mediasort.scanner import (
     PARTIAL_EXT,
@@ -37,6 +37,8 @@ ROOT_MISSING = "Bibliotheksordner fehlt – ist die Freigabe eingebunden?"
 UNDECIDED = "Konflikt nicht entschieden"
 TARGET_TAKEN = "Ziel belegt"
 SOURCE_CHANGED = "Quelle wurde seit dem Scan verändert"
+EXISTING_CHANGED = "Vorhandene Datei hat sich seit dem Scan verändert"
+PARTIAL_REFUSED = "Vorhandene Datei enthält weitere Folgen"
 _DECISIONS = (None, "keep_new", "keep_existing", "keep_both")
 # Beiwerk, das beim Aufräumen unabhängig von der Größe mitgelöscht werden darf
 LEFTOVER_EXT = frozenset({
@@ -253,19 +255,54 @@ def _moved_to(s: Session, raw: str, scan_id: int | None, moved_now: dict[str, st
     return Path(new_path) if new_path else None
 
 
-def _resolve_existing(s: Session, item: Item, source: Path, moved_now: dict[str, str]) -> list[Path]:
+@dataclass(frozen=True)
+class _Existing:
+    path: Path  # wo die Version jetzt liegt
+    raw: str  # wie sie im Konflikt steht
+    moved: bool  # in diesem Auftrag bzw. Scan von mediasort verschoben
+
+
+def _same_name(a: Path, b: Path) -> bool:
+    """Gleicher Pfad bis auf Groß-/Kleinschreibung (auf SMB derselbe Eintrag)."""
+    return casefold(str(a)) == casefold(str(b))
+
+
+def _resolve_existing(s: Session, item: Item, source: Path, moved_now: dict[str, str]) -> list[_Existing]:
     """Vorhandene Versionen; nicht mehr vorhandene Pfade nur über protokollierte Verschiebungen
-    desselben Auftrags bzw. Scans auflösen, sonst überspringen."""
-    found: list[Path] = []
+    desselben Auftrags bzw. Scans auflösen, sonst überspringen. Die Quelle selbst – auch nur
+    anders geschrieben – ist nie eine vorhandene Version."""
+    found: list[_Existing] = []
     for raw in (item.conflict_json or {}).get("existing", []):
-        path = Path(raw)
+        path, moved = Path(raw), False
         if not path.is_file():
-            path = _moved_to(s, raw, item.scan_id, moved_now)
+            path, moved = _moved_to(s, raw, item.scan_id, moved_now), True
             if path is None or not path.is_file():
                 continue
-        if path != source and path not in found and not _same_file(path, source):
-            found.append(path)
+        if path == source or _same_name(path, source) or _same_file(path, source):
+            continue
+        if path not in [e.path for e in found]:
+            found.append(_Existing(path, raw, moved))
     return found
+
+
+def _unchanged(entry: _Existing, conflict: dict) -> bool:
+    """Liegt die vorhandene Version noch so vor wie beim Scan (Größe, Änderungszeit)?
+
+    Alte Konflikte ohne ``existing_meta`` werden nicht geprüft. Von mediasort selbst verschobene
+    Versionen werden nur an der Größe gemessen (eine Kopie über Dateisystemgrenzen ändert die Zeit).
+    """
+    if "existing_meta" not in conflict:
+        return True
+    meta = next((m for m in conflict["existing_meta"] or [] if m.get("path") == entry.raw), None)
+    if meta is None or meta.get("size") is None:
+        return False
+    try:
+        st = entry.path.stat()
+    except OSError:
+        return False
+    if st.st_size != meta["size"]:
+        return False
+    return entry.moved or st.st_mtime == meta.get("mtime")
 
 
 def _library_root(target: Path, libraries: Sequence[Path]) -> Path:
@@ -374,8 +411,11 @@ class _ItemRun:
             return False
         if decision not in _DECISIONS:
             raise _Failed(f"Unbekannte Entscheidung: {decision}")
-        if item.conflict_json and decision is None:
+        conflict = item.conflict_json or {}
+        if conflict and decision is None:
             raise _Failed(UNDECIDED)
+        if decision == "keep_new" and conflict.get("partial"):
+            raise _Failed(PARTIAL_REFUSED)
 
         source = Path(item.source)
         try:
@@ -385,7 +425,8 @@ class _ItemRun:
         if st.st_size != item.size or st.st_mtime != item.mtime:
             raise _Failed(SOURCE_CHANGED)
         source_subs = list(item.subtitles_json or [])
-        existing = _resolve_existing(s, item, source, self.ctx.moved)
+        resolved = _resolve_existing(s, item, source, self.ctx.moved)
+        existing = [e.path for e in resolved]
         report = self.ctx.report
 
         if decision == "keep_existing":
@@ -414,6 +455,9 @@ class _ItemRun:
         for aside in map(_parked, [replaced, *replaced_subs] if replaced else []):
             if _exists(aside):
                 raise _Failed(f"Zwischenname belegt: {aside}")
+        doomed = resolved if decision == "keep_new" else []  # werden ersetzt bzw. gelöscht
+        if not all(_unchanged(e, conflict) for e in doomed):
+            raise _Failed(EXISTING_CHANGED)
 
         _make_dirs(root, target.parent)
         self.ctx.placed.add(target.parent)
@@ -430,10 +474,11 @@ class _ItemRun:
         for sub_source, sub_target in sub_moves:
             if sub_source.is_file():
                 self.move(sub_source, sub_target)
-        if decision == "keep_new":
-            for path in existing:
-                if path != replaced and path != target and path.is_file():
-                    self.delete_version(path)
+        for entry in doomed:
+            if entry.path != replaced and entry.path != target and entry.path.is_file():
+                if not _unchanged(entry, conflict):  # während des Verschiebens verändert
+                    raise _Failed(EXISTING_CHANGED)
+                self.delete_version(entry.path)
         self.cleanup(item, source.parent)
         return True
 

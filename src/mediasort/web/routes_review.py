@@ -58,7 +58,18 @@ DECISION_LABELS = {
 }
 _BETTER_LABELS = {"keep_new": f"Bessere behalten (neue Version) – {_DELETES_EXISTING}",
                   "keep_existing": f"Bessere behalten (vorhandene Version) – {_DELETES_NEW}"}
+PARTIAL_HINT = ("Die vorhandene Datei enthält weitere Folgen und kann deshalb nicht durch die neue "
+                "Version ersetzt werden – bitte selbst entscheiden.")
+PARTIAL_NO_KEEP_NEW = "Die vorhandene Datei enthält weitere Folgen – „Neue Version behalten“ ist hier nicht möglich."
+CONFLICT_HEADINGS = {
+    "library": "Konflikt: dieser Titel liegt schon in der Bibliothek",
+    "scan": "Konflikt: dieser Titel liegt bereits in diesem Scan vor",
+    "open": "Konflikt: dieser Titel liegt bereits in einem anderen offenen Vorschlag vor",
+}
+_ORIGIN_NOTES = {"scan": "in diesem Scan", "open": "offener Vorschlag eines anderen Scans"}
 _CHANNELS = {1: "1.0", 2: "2.0", 3: "2.1", 6: "5.1", 7: "6.1", 8: "7.1"}
+_MB = 1024 * 1024
+_GB = 1024 * _MB
 _VISIBLE = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value, ItemStatus.ERROR.value)
 _QUERY_YEAR = re.compile(r"^(?P<title>.*\S)\s+\(?(?P<year>(?:19|20)\d{2})\)?$")
 
@@ -67,8 +78,15 @@ _QUERY_YEAR = re.compile(r"^(?P<title>.*\S)\s+\(?(?P<year>(?:19|20)\d{2})\)?$")
 
 
 @dataclass
+class ExistingView:
+    path: str
+    details: str | None  # Größe, technische Angaben, Herkunft (fehlt bei alten Konflikten)
+
+
+@dataclass
 class ConflictView:
-    existing: list[str]
+    heading: str
+    existing: list[ExistingView]
     hint: str
     options: list[tuple[str, str]]  # (Entscheidung, Beschriftung)
     selected: str | None
@@ -176,10 +194,15 @@ def blocked_reason(item: Item) -> str | None:
 
 
 def decision_options(item: Item) -> list[tuple[str, str]]:
-    """„Bessere behalten“ (bzw. beide Richtungen ohne Vorschlag), „Beide behalten“, „Überspringen“."""
+    """„Bessere behalten“ (bzw. beide Richtungen ohne Vorschlag), „Beide behalten“, „Überspringen“.
+
+    Enthält eine vorhandene Datei weitere Folgen (``partial``), gibt es „Neue Version behalten“ nicht.
+    """
     conflict = item.conflict_json or {}
     suggestion = conflict.get("suggestion")
-    if suggestion in _BETTER_LABELS:
+    if conflict.get("partial"):
+        options = [("keep_existing", DECISION_LABELS["keep_existing"])]
+    elif suggestion in _BETTER_LABELS:
         options = [(suggestion, _BETTER_LABELS[suggestion])]
     else:
         options = [("keep_new", DECISION_LABELS["keep_new"]), ("keep_existing", DECISION_LABELS["keep_existing"])]
@@ -189,15 +212,49 @@ def decision_options(item: Item) -> list[tuple[str, str]]:
     return options
 
 
+def size_text(size: int) -> str:
+    """Dateigröße für Menschen, z. B. ``"4,2 GB"``."""
+    if size >= _GB:
+        return f"{size / _GB:.1f} GB".replace(".", ",")
+    if size >= _MB:
+        return f"{size / _MB:.1f} MB".replace(".", ",")
+    return f"{size} Bytes"
+
+
+def _existing_views(conflict: Mapping) -> list[ExistingView]:
+    metas = {m.get("path"): m for m in conflict.get("existing_meta") or []}
+    views = []
+    for path in conflict.get("existing") or []:
+        meta = metas.get(path)
+        if meta is None:
+            views.append(ExistingView(path, None))
+            continue
+        parts = [size_text(meta["size"])] if meta.get("size") is not None else []
+        parts.append(meta.get("labels") or "keine technischen Angaben")
+        if meta.get("origin") in _ORIGIN_NOTES:
+            parts.append(_ORIGIN_NOTES[meta["origin"]])
+        views.append(ExistingView(path, " · ".join(parts)))
+    return views
+
+
+def _conflict_heading(conflict: Mapping) -> str:
+    """„In diesem Scan“ bzw. „anderer offener Vorschlag“ nur, wenn alle vorhandenen Versionen daher stammen."""
+    origins = {m.get("origin") for m in conflict.get("existing_meta") or []}
+    origin = origins.pop() if len(origins) == 1 else "library"
+    return CONFLICT_HEADINGS.get(origin, CONFLICT_HEADINGS["library"])
+
+
 def _conflict_view(item: Item) -> ConflictView | None:
     if not item.conflict_json:
         return None
     suggestion = item.conflict_json.get("suggestion")
     options = decision_options(item)
     labels = dict(options)
+    hint = PARTIAL_HINT if item.conflict_json.get("partial") else SUGGESTION_TEXTS.get(suggestion, SUGGESTION_TEXTS[None])
     return ConflictView(
-        existing=list(item.conflict_json.get("existing") or []),
-        hint=SUGGESTION_TEXTS.get(suggestion, SUGGESTION_TEXTS[None]),
+        heading=_conflict_heading(item.conflict_json),
+        existing=_existing_views(item.conflict_json),
+        hint=hint,
         options=options,
         selected=item.decision or (suggestion if suggestion in labels else None),
         decided=labels.get(item.decision, item.decision) if item.decision else None,
@@ -441,6 +498,8 @@ def decide(request: Request, item_id: int, form: Form):
         if not item.conflict_json or item.status not in (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value):
             return _row_response(request, item_id, 409, "Hier gibt es nichts zu entscheiden.")
         if decision not in dict(decision_options(item)):
+            if decision == "keep_new" and item.conflict_json.get("partial"):
+                return _row_response(request, item_id, 409, PARTIAL_NO_KEEP_NEW)
             return _row_response(request, item_id, 409,
                                  "„Beide behalten“ geht nur, wenn die Zielnamen verschieden sind.")
         if decision == "skip":

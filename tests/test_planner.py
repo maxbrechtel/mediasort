@@ -317,7 +317,8 @@ def test_library_duplicate_folder_is_conflict(env):
     items = env.plan("Filme_2D").items()
     assert len(items) == 1
     assert items[0].target == env.p("Filme_2D/Matrix (1999)/Matrix (1999) 720p h264 AC3 [DE].mkv")
-    assert items[0].conflict_json == {"existing": [str(correct)], "suggestion": "keep_existing"}
+    conflict = items[0].conflict_json
+    assert (conflict["existing"], conflict["suggestion"], conflict["partial"]) == ([str(correct)], "keep_existing", False)
 
 
 def test_library_folder_found_by_title_remembers_tmdb_id(env):
@@ -335,7 +336,8 @@ def test_existing_episode_in_series_library_is_conflict(env):
     env.file("Serien/Reacher (2022)/Season 4/reacher.s04e03.720p.mkv")
     env.file("Downloads/Reacher.S04E02.German.DL.1080P.WEBRip.h265-WOTT/x.mkv")
     it = env.plan("Downloads").items()[0]
-    assert it.conflict_json == {"existing": [str(old)], "suggestion": "keep_new"}
+    conflict = it.conflict_json
+    assert (conflict["existing"], conflict["suggestion"], conflict["partial"]) == ([str(old)], "keep_new", False)
 
 
 def test_conflict_without_quality_info_has_no_suggestion(env):
@@ -475,7 +477,8 @@ def test_same_movie_in_batch_with_different_names_is_conflict(env):
     first, second = env.plan("Downloads").items()
     assert first.target != second.target
     assert first.conflict_json is None
-    assert second.conflict_json == {"existing": [first.source], "suggestion": "keep_new"}
+    conflict = second.conflict_json
+    assert (conflict["existing"], conflict["suggestion"], conflict["partial"]) == ([first.source], "keep_new", False)
 
 
 def test_same_episode_in_batch_with_different_names_is_conflict(env):
@@ -494,7 +497,9 @@ def test_multi_episode_overlap_in_batch_is_conflict(env):
     env.file("Downloads/Reacher.S04E05E06.German.DL.1080p.WEB.h265-W4K/a.mkv")
     env.file("Downloads/Reacher.S04E06.German.DL.720p.WEB.h264-X/b.mkv", info=MI(1280, 720, "h264", None, [A("aac", "de", 2)]))
     first, second = env.plan("Downloads").items()
-    assert second.conflict_json == {"existing": [first.source], "suggestion": "keep_existing"}
+    # die vorhandene Doppelfolge enthält E05, die neue Datei nicht: kein Vorschlag (Abschlussprüfung C2)
+    conflict = second.conflict_json
+    assert (conflict["existing"], conflict["suggestion"], conflict["partial"]) == ([first.source], None, True)
 
 
 def test_unchanged_error_file_is_not_planned_again(env):
@@ -530,3 +535,121 @@ def test_small_video_is_reported_in_scan_errors(env):
     with env.sm() as s:
         scan = s.get(Scan, result.scan_id)
     assert scan.errors_json == [f"Kleine Videodatei übersprungen (unter Sample-Grenze): {small}"]
+
+
+# --- Abschlussprüfung C2: „Neue behalten“ löscht nur echte Dubletten ---------------------
+
+SMALL_INFO = MI(1280, 720, "h264", None, [A("ac3", "de", 2)])
+
+
+def _execute(env, item_id, decision):
+    from mediasort.db import Job
+    from mediasort.executor import execute
+
+    with env.sm() as s:
+        item = s.get(Item, item_id)
+        item.decision, item.status = decision, "confirmed"
+        job = Job(kind="execute", status="running")
+        s.add(job)
+        s.commit()
+        job_id = job.id
+    return execute(env.sm, [item_id], settings=env.settings, job_id=job_id)
+
+
+def test_keep_new_spares_plex_extras_and_subfolders(env):
+    old = env.file("Filme_2D/Matrix (1999)/Matrix (1999).mkv", SMALL_INFO)
+    keep = [
+        env.file("Filme_2D/Matrix (1999)/Featurettes/Making of.mkv", SMALL_INFO),
+        env.file("Filme_2D/Matrix (1999)/Matrix (1999)-trailer.mkv", SMALL_INFO),
+        env.file("Filme_2D/Matrix (1999)/Matrix (1999)-Behindthescenes.mp4", SMALL_INFO),
+        env.file("Filme_2D/Matrix (1999)/.deletedByTMM/Matrix (1999) alt.mkv", SMALL_INFO),
+        env.file("Filme_2D/Matrix (1999)/Sample/Matrix.mkv", SMALL_INFO),
+        env.file("Filme_2D/Matrix (1999)/.versteckt.mkv", SMALL_INFO),
+    ]
+    env.file("Downloads/The.Matrix.1999.2160p.UHD/The.Matrix.1999.2160p.mkv", UHD_DE)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json["existing"] == [str(old)]
+    assert it.conflict_json["suggestion"] == "keep_new"
+    assert _execute(env, it.id, "keep_new").done == 1
+    assert not old.exists() and all(p.exists() for p in keep)
+
+
+def test_small_existing_movie_file_is_not_a_version(env):
+    env.settings.sample_bytes = 100
+    env.file("Filme_2D/Matrix (1999)/Matrix (1999) clip.mkv", SMALL_INFO, content=b"x" * 50)
+    env.file("Downloads/The.Matrix.1999.2160p.UHD/m.mkv", UHD_DE, content=b"x" * 500)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json is None
+
+
+def test_2d_and_3d_of_same_movie_in_one_batch_do_not_conflict(env):
+    env.file("Downloads/Avatar.2009.1080p/Avatar.2009.1080p.mkv")
+    env.file("Downloads/Avatar.2009.3D.HSBS.1080p/Avatar.2009.3D.HSBS.1080p.mkv")
+    items = env.plan("Downloads").items()
+    assert len(items) == 2 and not any(it.conflict_json for it in items)
+    assert {Path(it.target).parts[-3] for it in items} == {"Filme_2D", "Filme_3D"}
+
+
+def test_single_episode_vs_existing_double_episode_is_partial(env):
+    double = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01-E02 - 720p.mkv", SMALL_INFO)
+    src = env.file("Downloads/Reacher.S04E01.German.DL.2160p.WEB/Reacher.S04E01.German.DL.2160p.WEB.mkv", UHD_DE)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json["existing"] == [str(double)]
+    assert it.conflict_json["partial"] is True and it.conflict_json["suggestion"] is None
+    r = _execute(env, it.id, "keep_new")
+    assert r.failed == 1 and env.item(it.id).error == "Vorhandene Datei enthält weitere Folgen"
+    assert double.exists() and src.exists()
+
+
+def test_double_episode_vs_existing_single_is_not_partial(env):
+    single = env.file("Serien/Reacher (2022)/Staffel 4/Reacher - S04E01 - 720p.mkv", SMALL_INFO)
+    env.file("Downloads/Reacher.S04E01E02.German.DL.2160p.WEB/x.mkv", UHD_DE)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json["existing"] == [str(single)]
+    assert it.conflict_json["partial"] is False and it.conflict_json["suggestion"] == "keep_new"
+
+
+def test_title_only_library_match_has_no_suggestion(env):
+    old = env.file("Filme_2D/Matrix/Matrix 720p.mkv", SMALL_INFO)  # ohne Jahr und ohne NFO
+    env.file("Downloads/The.Matrix.1999.2160p/m.mkv", UHD_DE)
+    [it] = env.plan("Downloads").items()
+    assert it.conflict_json["existing"] == [str(old)] and it.conflict_json["suggestion"] is None
+    with env.sm() as s:
+        entry = s.scalars(select(LibraryEntry).where(LibraryEntry.path == env.p("Filme_2D/Matrix"))).one()
+    assert entry.tmdb_id is None  # geratene ID wird nicht gemerkt
+
+
+def test_conflict_records_existing_meta(env):
+    old = env.file("Filme_2D/Matrix (1999)/Matrix (1999) 720p.mkv",
+                   MI(3840, 2160, "hevc", "DV", [A("truehd", "de", 8), A("ac3", "en", 6)]))
+    iso = env.file("Filme_2D/Matrix (1999)/Matrix (1999).iso", None)
+    env.file("Downloads/The.Matrix.1999.1080p/m.mkv")
+    [it] = env.plan("Downloads").items()
+    st, st_iso = old.stat(), iso.stat()
+    assert it.conflict_json["existing_meta"] == [
+        {"path": str(old), "size": st.st_size, "mtime": st.st_mtime, "labels": "2160p h265 DV TrueHD [DE+EN]",
+         "origin": "library"},
+        {"path": str(iso), "size": st_iso.st_size, "mtime": st_iso.st_mtime, "labels": None, "origin": "library"},
+    ]
+    assert it.conflict_json["suggestion"] is None  # ISO ohne technische Angaben
+
+
+def test_batch_conflict_meta_marks_origin_scan(env):
+    first = env.file("Downloads/The.Matrix.1999.1080p/a.mkv")
+    env.file("Downloads/The.Matrix.1999.2160p/b.mkv", UHD_DE)
+    _, second = env.plan("Downloads").items()
+    st = first.stat()
+    assert second.conflict_json["existing_meta"] == [
+        {"path": str(first), "size": st.st_size, "mtime": st.st_mtime, "labels": "1080p h264 DTS [DE+EN]",
+         "origin": "scan"}]
+
+
+def test_changed_existing_file_is_not_deleted(env):
+    old = env.file("Filme_2D/Matrix (1999)/Matrix (1999) 720p.mkv", SMALL_INFO)
+    src = env.file("Downloads/The.Matrix.1999.2160p/m.mkv", UHD_DE)
+    [it] = env.plan("Downloads").items()
+    old.write_bytes(b"inzwischen ersetzt, andere Groesse")
+    r = _execute(env, it.id, "keep_new")
+    assert r.failed == 1 and env.item(it.id).error == "Vorhandene Datei hat sich seit dem Scan verändert"
+    assert old.read_bytes() == b"inzwischen ersetzt, andere Groesse" and src.exists()
+    assert not Path(it.target).exists()

@@ -9,7 +9,6 @@ from mediasort.library import (
     episode_files,
     parse_folder_name,
     read_nfo_tmdb_id,
-    videos_in,
 )
 from mediasort.models import Candidate, MediaKind
 
@@ -205,15 +204,6 @@ def test_remember_unknown_folder_adds_entry(lib):
     assert index.find(M(5, "Neu", 2024)) == [root / "Neu (2024)"]
 
 
-def test_videos_in(tmp_path):
-    mk(tmp_path, "b/z.MKV")
-    mk(tmp_path, "a.mp4")
-    mk(tmp_path, "a.srt")
-    mk(tmp_path, "info.nfo")
-    assert videos_in(tmp_path) == [tmp_path / "a.mp4", tmp_path / "b" / "z.MKV"]
-    assert videos_in(tmp_path / "weg") == []
-
-
 def test_episode_files(tmp_path):
     for n in ["Season 4/Reacher.S04E05.mkv", "Staffel 4/Reacher - S04E05-E06 - X.mkv", "Staffel 4/Reacher - S04E07.mkv"]:
         mk(tmp_path, n)
@@ -222,3 +212,29 @@ def test_episode_files(tmp_path):
     assert len(episode_files(tmp_path, 4, [5])) == 2
     assert len(episode_files(tmp_path, 4, [5, 7])) == 3
     assert episode_files(tmp_path, 4, [9]) == []
+
+
+# --- Abschlussprüfung C2 ------------------------------------------------------------
+
+
+def test_movie_versions_only_direct_real_videos(tmp_path):
+    from mediasort.library import movie_versions
+
+    for rel in ("Film (2000).mkv", "Film (2000) 2160p.MPG", "Film (2000)-trailer.mkv", "Film (2000)-Featurette.mp4",
+                "Film-deletedscene.mkv", "Film-other.mkv", "Film-sample.mkv", "sample.mkv", ".hidden.mkv",
+                "Featurettes/Making of.mkv", ".deletedByTMM/alt.mkv", "Subs/x.srt", "film.nfo"):
+        mk(tmp_path, rel, "x" * 10)
+    mk(tmp_path, "klein.mkv", "x")
+    assert movie_versions(tmp_path, sample_bytes=5) == [tmp_path / "Film (2000) 2160p.MPG", tmp_path / "Film (2000).mkv"]
+    assert movie_versions(tmp_path / "weg", sample_bytes=0) == []
+
+
+def test_episode_files_skip_hidden_excluded_and_extras_dirs(tmp_path):
+    for rel in ("Staffel 4/Reacher - S04E05.mkv", "Specials/Reacher - S04E05 Special.mkv",
+                "Extras/Reacher.S04E05.mkv", "Behind The Scenes/Reacher.S04E05.mkv", "featurettes/Reacher.S04E05.mkv",
+                ".deletedByTMM/Reacher.S04E05.mkv", "@eaDir/Reacher.S04E05.mkv", ".x/Reacher.S04E05.mkv",
+                "Staffel 4/Reacher - S04E05-trailer.mkv", "Staffel 4/Sample/Reacher.S04E05.mkv"):
+        mk(tmp_path, rel)
+    found = episode_files(tmp_path, 4, [5], exclude=[".deletedByTMM", "@eaDir"])
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in found) == [
+        "Specials/Reacher - S04E05 Special.mkv", "Staffel 4/Reacher - S04E05.mkv"]

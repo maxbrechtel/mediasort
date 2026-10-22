@@ -1,5 +1,6 @@
 """Vorschläge erzeugen: scannen, zerlegen, abgleichen, Zielpfade und Konflikte (Spec 5, 7.1, 7.2, 7.5)."""
 
+import os
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -9,8 +10,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from mediasort.db import Folder, Ignored, Item, Scan
-from mediasort.library import LibraryIndex, episode_files, videos_in
+from mediasort.db import Folder, Ignored, Item, Scan, casefold
+from mediasort.library import LibraryIndex, ShowVideo, movie_versions, show_videos
 from mediasort.matcher import match
 from mediasort.mediainfo import ProbeError
 from mediasort.models import (
@@ -27,7 +28,7 @@ from mediasort.models import (
 )
 from mediasort.namer import episode_relpath, movie_relpath, subtitle_targets
 from mediasort.parser import normalize_title, parse_name
-from mediasort.quality import better, quality_key
+from mediasort.quality import better, quality_key, short_label
 from mediasort.scanner import scan
 from mediasort.settings import Settings
 from mediasort.tmdb import TmdbClient, TmdbError
@@ -40,6 +41,10 @@ _OPEN_STATUSES = (ItemStatus.NEW.value, ItemStatus.CONFIRMED.value)
 _REPLANNABLE = (ItemStatus.NEW.value, ItemStatus.ERROR.value, ItemStatus.CONFIRMED.value)
 _CONFIDENCE_ORDER = (Confidence.LOW, Confidence.MEDIUM, Confidence.HIGH)
 _SUGGESTIONS = {"a": "keep_new", "b": "keep_existing"}
+# Herkunft einer vorhandenen Version (``existing_meta[].origin``)
+ORIGIN_LIBRARY = "library"  # liegt in der Bibliothek
+ORIGIN_SCAN = "scan"  # Quelle eines anderen Vorschlags desselben Scans
+ORIGIN_OPEN = "open"  # Quelle eines offenen Vorschlags aus einem anderen Scan
 
 
 @dataclass
@@ -168,11 +173,47 @@ def _cap_confidence(item: Item, cap: Confidence) -> None:
         item.confidence = cap.value
 
 
-def _identities(kind: MediaKind, tmdb_id: int, season: int | None, episodes: Sequence[int]) -> list[tuple]:
-    """Schlüssel „derselbe Film“ bzw. „dieselbe Folge“ (je Folgennummer, damit Doppelfolgen überlappen)."""
+def _identities(
+    kind: MediaKind, tmdb_id: int, season: int | None, episodes: Sequence[int], library: str
+) -> list[tuple]:
+    """Schlüssel „derselbe Film“ (je Bibliothek: 2D und 3D sind keine Dubletten) bzw. „dieselbe Folge“
+    (je Folgennummer, damit Doppelfolgen überlappen)."""
     if kind == MediaKind.MOVIE:
-        return [("movie", tmdb_id)]
+        return [("movie", library, tmdb_id)]
     return [("episode", tmdb_id, season, e) for e in episodes]
+
+
+def _exists(path: Path) -> bool:
+    return path.exists()
+
+
+def _same_entry(a: Path, b: Path) -> bool:
+    """Derselbe Eintrag – auch auf SMB, wo sich Namen nur in der Groß-/Kleinschreibung unterscheiden."""
+    if casefold(str(a)) == casefold(str(b)):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _library_path(target: str, folders: dict[int, Folder]) -> str:
+    """Bibliothek, in der ``target`` liegt (die tiefste passende), sonst der Zielordner selbst."""
+    roots = [Path(f.path) for f in folders.values() if f.role == "library"]
+    matches = [r for r in roots if Path(target).is_relative_to(r)]
+    return str(max(matches, key=lambda r: len(r.parts))) if matches else str(Path(target).parent)
+
+
+@dataclass(frozen=True)
+class _Version:
+    """Quelle eines anderen Vorschlags, die als vorhandene Version zählt."""
+
+    source: str
+    info: MediaInfo | None
+    size: int
+    mtime: float
+    episodes: tuple[int, ...]
+    origin: str
 
 
 @dataclass(frozen=True)
@@ -200,9 +241,9 @@ class _Run:
         self._indexes: dict[tuple[int, str], LibraryIndex] = {}
         self._seasons: dict[tuple[int, int], _SeasonCheck] = {}
         self._episode_names: dict[tuple[int, int], dict[int, str]] = {}
-        # Zielpfad oder Identität (siehe ``_identities``) -> (Quelle, MediaInfo, Größe) des Items,
-        # das sie in diesem Scan zuerst belegt hat
-        self.claimed: dict[Hashable, tuple[str, MediaInfo | None, int]] = {}
+        self._shows: dict[Path, list[ShowVideo]] = {}  # Serienordner -> geparste Folgen-Dateien
+        # Zielpfad oder Identität (siehe ``_identities``) -> Version des Items, das sie zuerst belegt hat
+        self.claimed: dict[Hashable, _Version] = {}
 
     def index(self, library: Folder, kind: MediaKind) -> LibraryIndex:
         index_kind = "series" if kind == MediaKind.EPISODE else "movie"
@@ -240,6 +281,14 @@ class _Run:
             self._episode_names[key] = names
         return self._episode_names[key]
 
+    def show_videos(self, show_dir: Path) -> list[ShowVideo]:
+        """Folgen-Dateien eines Serienordners, je Lauf nur einmal gelesen und geparst."""
+        if show_dir not in self._shows:
+            settings = self.ctx.settings
+            self._shows[show_dir] = show_videos(show_dir, exclude=settings.exclude,
+                                                sample_bytes=settings.sample_bytes)
+        return self._shows[show_dir]
+
     def claim(
         self,
         target: str,
@@ -247,9 +296,10 @@ class _Run:
         tmdb_id: int,
         season: int | None,
         episodes: Sequence[int],
-        version: tuple[str, MediaInfo | None, int],
+        library: str,
+        version: _Version,
     ) -> None:
-        for key in (target, *_identities(kind, tmdb_id, season, episodes)):
+        for key in (target, *_identities(kind, tmdb_id, season, episodes, library)):
             self.claimed.setdefault(key, version)
 
     def place(
@@ -291,7 +341,8 @@ class _Run:
         item.subtitles_json = _subtitles_json(subs, target)
         item.conflict_json = self._conflict(library, cand, kind, season, episodes, source, target,
                                             info, item.size)
-        self.claim(str(target), kind, cand.tmdb_id, season, episodes, (str(source), info, item.size))
+        self.claim(str(target), kind, cand.tmdb_id, season, episodes, library.path,
+                   _Version(str(source), info, item.size, item.mtime, tuple(episodes), ORIGIN_SCAN))
         return True
 
     def _conflict(
@@ -306,41 +357,83 @@ class _Run:
         info: MediaInfo | None,
         size: int,
     ) -> dict[str, Any] | None:
+        """Vorhandene Versionen desselben Titels (Spec 7.2, Abschlussprüfung C2).
+
+        ``existing``: Pfade; ``existing_meta``: je Pfad Größe, Änderungszeit, Kurzbeschreibung und
+        Herkunft (zum Prüfen vor dem Löschen); ``partial``: eine vorhandene Datei enthält Folgen, die
+        die neue nicht hat (dann darf die neue sie nicht ersetzen); ``suggestion``: bessere Version.
+        """
         index = self.index(library, kind)
-        # Pfad -> bekannte (MediaInfo, Größe) oder None (wird bei Bedarf untersucht)
-        existing: dict[str, tuple[MediaInfo | None, int] | None] = {}
-        for folder in index.find(cand):
-            index.remember(folder, cand.tmdb_id)
-            files = videos_in(folder) if kind == MediaKind.MOVIE else episode_files(folder, season, episodes)
+        # Pfad -> bekannte Version (Quelle eines anderen Vorschlags) oder None (liegt in der Bibliothek)
+        found: dict[str, _Version | None] = {}
+        coverage: dict[str, tuple[int, ...]] = {}  # Folgennummern vorhandener Folgen-Dateien
+        title_only = False
+        for match in index.find_matches(cand):
+            if not match.title_only:  # eine nur über den Titel geratene ID wird nicht gemerkt
+                index.remember(match.path, cand.tmdb_id)
+            if kind == MediaKind.MOVIE:
+                files = movie_versions(match.path, self.ctx.settings.sample_bytes)
+            else:
+                files = []
+                for video in self.show_videos(match.path):
+                    if video.season == season and set(episodes).intersection(video.episodes):
+                        files.append(video.path)
+                        coverage[str(video.path)] = video.episodes
             for path in files:
-                existing.setdefault(str(path), None)
-        if target.exists():
-            existing.setdefault(str(target), None)
-        for key in (str(target), *_identities(kind, cand.tmdb_id, season, episodes)):
+                found.setdefault(str(path), None)
+            title_only = title_only or (match.title_only and bool(files))
+        if _exists(target):
+            found.setdefault(str(target), None)
+        for key in (str(target), *_identities(kind, cand.tmdb_id, season, episodes, library.path)):
             claim = self.claimed.get(key)
             if claim is not None:
-                existing[claim[0]] = (claim[1], claim[2])
-        existing.pop(str(source), None)
-        if not existing:
+                found[claim.source] = claim
+        for path in [p for p in found if _same_entry(Path(p), source)]:
+            del found[path]  # die Quelle selbst (auch nur anders geschrieben) ist keine Dublette
+        if not found:
             return None
-        return {"existing": list(existing), "suggestion": self._suggestion(existing, info, size)}
 
+        meta: list[dict[str, Any]] = []
+        versions: list[tuple[MediaInfo | None, int | None]] = []
+        partial = False
+        for path, known in found.items():
+            if known is not None:
+                v_info, v_size, v_mtime, origin = known.info, known.size, known.mtime, known.origin
+                covered = known.episodes
+            else:
+                v_info, v_size, v_mtime, origin = self._inspect(Path(path))
+                covered = coverage[path] if path in coverage else self._parsed_episodes(Path(path))
+            if kind == MediaKind.EPISODE and set(covered) - set(episodes):
+                partial = True
+            meta.append({"path": path, "size": v_size, "mtime": v_mtime,
+                         "labels": short_label(v_info) if v_info is not None else None, "origin": origin})
+            versions.append((v_info, v_size))
+        suggestion = None if partial or title_only else self._suggestion(versions, info, size)
+        return {"existing": list(found), "suggestion": suggestion, "partial": partial, "existing_meta": meta}
+
+    def _inspect(self, path: Path) -> tuple[MediaInfo | None, int | None, float | None, str]:
+        """(MediaInfo, Größe, Änderungszeit, Herkunft) einer Datei in der Bibliothek; ``None``, wo unbekannt."""
+        try:
+            st = path.stat()
+            v_size, v_mtime = st.st_size, st.st_mtime
+        except OSError:
+            v_size = v_mtime = None
+        try:
+            v_info = self.ctx.probe(path)
+        except (ProbeError, OSError):
+            v_info = None
+        return v_info, v_size, v_mtime, ORIGIN_LIBRARY
+
+    @staticmethod
+    def _parsed_episodes(path: Path) -> tuple[int, ...]:
+        return tuple(parse_name(path.name, path.parent.name).episodes)
+
+    @staticmethod
     def _suggestion(
-        self,
-        existing: dict[str, tuple[MediaInfo | None, int] | None],
-        info: MediaInfo | None,
-        size: int,
+        versions: Sequence[tuple[MediaInfo | None, int | None]], info: MediaInfo | None, size: int
     ) -> str | None:
-        versions = []
-        for path, known in existing.items():
-            if known is None:
-                try:
-                    known = (self.ctx.probe(Path(path)), Path(path).stat().st_size)
-                except (ProbeError, OSError):
-                    return None
-            if known[0] is None:
-                return None
-            versions.append(known)
+        if any(v_info is None or v_size is None for v_info, v_size in versions):
+            return None
         best = max(versions, key=lambda v: quality_key(*v))
         return _SUGGESTIONS.get(better((info, size), best))
 
@@ -592,6 +685,16 @@ def _replan(
         item.status, item.note = ItemStatus.DONE.value, ALREADY_CORRECT_NOTE
 
 
+def _claim_item(run: _Run, other: Item, folders: dict[int, Folder], origin: str) -> None:
+    """Ziel und Identität eines anderen offenen Vorschlags als belegt vormerken."""
+    episodes = tuple(other.episodes_json or ())
+    run.claim(
+        other.target, MediaKind(other.kind), other.tmdb_id, other.season, episodes,
+        _library_path(other.target, folders),
+        _Version(other.source, mediainfo_from_json(other.mediainfo_json), other.size, other.mtime, episodes, origin),
+    )
+
+
 def replan_item(
     ctx: PlanContext,
     item_id: int,
@@ -624,10 +727,7 @@ def replan_item(
     run = _Run(ctx, folders[item.folder_id], folders)
     for other in others:
         if other not in group and other.status in _OPEN_STATUSES and other.target and other.tmdb_id:
-            run.claim(
-                other.target, MediaKind(other.kind), other.tmdb_id, other.season, other.episodes_json or (),
-                (other.source, mediainfo_from_json(other.mediainfo_json), other.size),
-            )
+            _claim_item(run, other, folders, ORIGIN_SCAN)
 
     corrected = tmdb_ref is not None
     _replan(run, item, cand, season=season, episodes=episodes, format_3d=format_3d, corrected=corrected)

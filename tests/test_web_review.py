@@ -312,7 +312,7 @@ def test_replan_refused_for_done_item(client, planned):
 def test_conflict_shows_both_versions_and_suggestion(client, planned_conflict):
     env = client.env
     item = env.item(MATRIX_FILE)
-    assert item.conflict_json == {"existing": [str(env.existing)], "suggestion": "keep_new"}
+    assert (item.conflict_json["existing"], item.conflict_json["suggestion"]) == ([str(env.existing)], "keep_new")
     t = client.get("/review").text
     assert str(env.existing) in t and str(env.media / MATRIX_FILE) in t
     assert "Vorschlag: die neue Version ist besser" in t
@@ -642,3 +642,38 @@ def test_bulk_buttons_show_counts(client, planned):
     assert "Alle sicheren übernehmen (3)" in r.text and "Ausgewählte ausführen (1)" in r.text
     r = client.post(f"/items/{env.item(UNKNOWN_FILE).id}/ignore", headers=HX)
     assert r.headers.get("HX-Trigger") == "items-changed"
+
+
+# --- Abschlussprüfung C2: Konfliktanzeige -----------------------------------------------------
+
+
+def test_conflict_lists_existing_files_with_size_and_labels(client, planned_conflict):
+    t = client.get("/review").text
+    assert str(client.env.existing) in t
+    assert "5 Bytes · 720p h264 AC3 [DE]" in t
+    assert "Konflikt: dieser Titel liegt schon in der Bibliothek" in t
+
+
+def test_partial_conflict_offers_no_keep_new(client, planned_conflict):
+    env = client.env
+    item = env.item(MATRIX_FILE)
+    env.update(item.id, conflict_json={**item.conflict_json, "suggestion": None, "partial": True})
+    t = client.get("/review").text
+    assert "Neue Version behalten" not in t and "Bessere behalten" not in t
+    assert "Vorhandene behalten – die neue Datei wird samt Untertiteln gelöscht" in t
+    assert "Beide behalten" in t and "Überspringen" in t
+    assert "enthält weitere Folgen" in t
+    r = client.post(f"/items/{item.id}/decision", data={"decision": "keep_new"}, headers=HX)
+    assert r.status_code == 409 and "enthält weitere Folgen" in r.text
+    assert env.get(item.id).decision is None
+    client.post(f"/items/{item.id}/decision", data={"decision": "keep_existing"})
+    assert env.get(item.id).decision == "keep_existing"
+
+
+def test_batch_conflict_heading_names_this_scan(client, env):
+    env.file("Downloads/The.Matrix.1999.720p/a.mkv", info=INFO_720)
+    env.file(MATRIX_FILE)
+    env.plan()
+    t = client.get("/review").text
+    assert "Konflikt: dieser Titel liegt bereits in diesem Scan vor" in t
+    assert "liegt schon in der Bibliothek" not in t

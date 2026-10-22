@@ -86,6 +86,20 @@ def languages_tag(streams: Sequence[AudioStream], fallback: Sequence[str]) -> st
     return "[" + "+".join(c.upper() for c in ordered) + "]"
 
 
+def short_label(info: MediaInfo) -> str:
+    """Kurzbeschreibung wie im Dateinamen, z. B. ``"2160p h265 DV TrueHD [DE+EN]"``."""
+    parts = [resolution_label(info.width, info.height), video_codec_label(info.video_codec)]
+    if info.hdr:
+        parts.append(info.hdr)
+    audio = pick_audio(info.audio)
+    if audio is not None:
+        parts.append(audio_codec_label(audio.codec, audio.profile))
+    tag = languages_tag(info.audio, ())
+    if tag:
+        parts.append(tag)
+    return " ".join(parts)
+
+
 def quality_key(info: MediaInfo | None, size: int) -> tuple | None:
     """Sortierschlüssel für den Qualitätsvergleich (größer = besser); ``None`` ohne MediaInfo."""
     if info is None:

@@ -316,7 +316,8 @@ class Env:
         return self.root / rel
 
     def item(self, source: str, target: str | None, *, subs=(), existing=None, suggestion=None,
-             decision=None, status="confirmed", data: bytes = b"video", scan_id=1) -> Item:
+             decision=None, status="confirmed", data: bytes = b"video", scan_id=1, meta=False,
+             partial=None) -> Item:
         src = self.p(source)
         if not src.exists():
             write(src, data)
@@ -330,6 +331,12 @@ class Env:
         conflict = None
         if existing is not None:
             conflict = {"existing": [str(self.p(e)) for e in existing], "suggestion": suggestion}
+            if meta:  # Größe und Änderungszeit der vorhandenen Versionen zum Zeitpunkt des Scans
+                conflict["existing_meta"] = [
+                    {"path": str(self.p(e)), "size": self.p(e).stat().st_size, "mtime": self.p(e).stat().st_mtime,
+                     "labels": None, "origin": "library"} for e in existing]
+            if partial is not None:
+                conflict["partial"] = partial
         with self.sf() as s:
             it = Item(source=str(src), size=st.st_size, mtime=st.st_mtime, kind="movie",
                       target=str(self.p(target)) if target else None, subtitles_json=sub_json,
@@ -800,3 +807,56 @@ def test_execute_keeps_folder_with_fresh_file(env):
     item = env.item_to_filme_2d()
     r = execute(env.sf, [item.id], settings=env.settings, job_id=1, now=lambda: nfo.stat().st_mtime + 60)
     assert r.done == 1 and nfo.exists()
+
+
+
+# --- Abschlussprüfung C2: nur unveränderte, echte Dubletten löschen --------------------------
+
+OLD_720 = "Filme_2D/M (2020)/M (2020) 720p.mkv"
+
+
+def test_keep_new_deletes_unchanged_existing_with_meta(env):
+    write(env.p(OLD_720), b"alt")
+    item = env.item("Downloads/Rel/m.mkv", TARGET_2D, existing=[OLD_720], decision="keep_new", meta=True)
+    assert run(env, item).done == 1 and not env.p(OLD_720).exists()
+
+
+def test_keep_new_refuses_changed_existing(env):
+    write(env.p(OLD_720), b"alt")
+    item = env.item("Downloads/Rel/m.mkv", TARGET_2D, existing=[OLD_720], decision="keep_new", meta=True)
+    env.p(OLD_720).write_bytes(b"ganz andere Datei")
+    r = run(env, item)
+    failed = env.get(item.id)
+    assert r.failed == 1 and failed.error == "Vorhandene Datei hat sich seit dem Scan verändert"
+    assert env.p(OLD_720).read_bytes() == b"ganz andere Datei"
+    assert env.p("Downloads/Rel/m.mkv").exists() and not env.p(TARGET_2D).exists() and env.history() == []
+
+
+def test_keep_new_refuses_changed_mtime_of_occupying_target(env):
+    write(env.p(TARGET_2D), b"alt")
+    item = env.item("Downloads/Rel/m.mkv", TARGET_2D, existing=[TARGET_2D], decision="keep_new", meta=True)
+    st = env.p(TARGET_2D).stat()
+    os.utime(env.p(TARGET_2D), (st.st_atime, st.st_mtime + 100))
+    r = run(env, item)
+    assert r.failed == 1 and env.get(item.id).error == "Vorhandene Datei hat sich seit dem Scan verändert"
+    assert env.p(TARGET_2D).read_bytes() == b"alt" and env.p("Downloads/Rel/m.mkv").exists()
+    assert not list(env.p("Filme_2D/M (2020)").glob("*.mediasort-old"))
+
+
+def test_keep_new_refused_for_partial_conflict(env):
+    old = "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv"
+    write(env.p(old), b"doppelfolge")
+    item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01.mkv", existing=[old],
+                    decision="keep_new", meta=True, partial=True)
+    r = run(env, item)
+    assert r.failed == 1 and env.get(item.id).error == "Vorhandene Datei enthält weitere Folgen"
+    assert env.p(old).exists() and env.p("Downloads/Rel/m.mkv").exists()
+
+
+def test_keep_existing_allowed_for_partial_conflict(env):
+    old = "Serien/S (2020)/Staffel 1/S - S01E01-E02.mkv"
+    write(env.p(old), b"doppelfolge")
+    item = env.item("Downloads/Rel/m.mkv", "Serien/S (2020)/Staffel 1/S - S01E01.mkv", existing=[old],
+                    decision="keep_existing", meta=True, partial=True)
+    assert run(env, item).done == 1
+    assert env.p(old).exists() and not env.p("Downloads/Rel/m.mkv").exists()

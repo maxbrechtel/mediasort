@@ -1,6 +1,6 @@
 {% set conflict = row.conflict %}
 <div class="conflict">
-  <strong>Konflikt: dieser Titel liegt schon in der Bibliothek</strong>
+  <strong>{{ conflict.heading }}</strong>
   <div class="versions">
     <div class="version">
       <span class="muted">Neue Version</span>
@@ -9,7 +9,7 @@
     </div>
     <div class="version">
       <span class="muted">Vorhanden</span>
-      {% for path in conflict.existing %}<code>{{ path }}</code>{% endfor %}
+      {% for entry in conflict.existing %}<code>{{ entry.path }}</code>{% if entry.details %}<small>{{ entry.details }}</small>{% endif %}{% endfor %}
     </div>
   </div>
   <p>{{ conflict.hint }}{% if conflict.decided %} <strong>Entschieden: {{ conflict.decided }}</strong>{% endif %}</p>
